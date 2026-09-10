@@ -9,8 +9,8 @@ CREATE TABLE public.profiles (
   email TEXT NOT NULL,
   business_name TEXT DEFAULT '',
   token_balance INTEGER DEFAULT 0,
-  agent_name TEXT DEFAULT '',
-  agent_language TEXT DEFAULT 'en',
+  agent_name TEXT DEFAULT 'AI Assistant',
+  agent_language TEXT DEFAULT 'English',
   telnyx_number TEXT DEFAULT '',
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
