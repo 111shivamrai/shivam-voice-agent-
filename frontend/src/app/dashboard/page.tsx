@@ -1,46 +1,84 @@
-import { createClient } from "@/lib/supabase/server";
-import { redirect } from "next/navigation";
-import {
-  Mail,
-  Coins,
-  Bot,
-  Globe,
-  Phone,
-  Calendar,
-} from "lucide-react";
+"use client";
 
-interface ProfileCard {
+import { useEffect, useState } from "react";
+import { createClient } from "@/lib/supabase/client";
+import { Coins, Bot, Phone } from "lucide-react";
+
+interface Profile {
+  business_name?: string;
+  token_balance?: number;
+  agent_name?: string;
+  agent_language?: string;
+  telnyx_number?: string;
+  created_at?: string;
+}
+
+interface StatCard {
   label: string;
   value: string;
   icon: React.ComponentType<{ className?: string }>;
 }
 
-export default async function DashboardPage() {
-  const supabase = await createClient();
+export default function DashboardPage() {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [profile, setProfile] = useState<Profile | null>(null);
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  useEffect(() => {
+    let isMounted = true;
 
-  if (!user) {
-    redirect("/login");
-  }
+    async function loadProfile() {
+      try {
+        setLoading(true);
+        setError(null);
+        const supabase = createClient();
+        const {
+          data: { user },
+          error: userError,
+        } = await supabase.auth.getUser();
 
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("*")
-    .eq("id", user.id)
-    .single();
+        if (userError || !user) {
+          throw userError || new Error("No authenticated user");
+        }
 
-  const cards: ProfileCard[] = [
-    {
-      label: "Email",
-      value: profile?.email ?? user.email ?? "—",
-      icon: Mail,
-    },
+        const { data, error: profileError } = await supabase
+          .from("profiles")
+          .select("*")
+          .eq("id", user.id)
+          .single();
+
+        if (profileError) {
+          throw profileError;
+        }
+
+        if (isMounted) {
+          setProfile(data);
+        }
+      } catch {
+        if (isMounted) {
+          setError("Unable to load data. Please refresh.");
+        }
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+    }
+
+    loadProfile();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const statCards: StatCard[] = [
     {
       label: "Token Balance",
-      value: String(profile?.token_balance ?? 0),
+      value:
+        profile?.token_balance !== undefined && profile?.token_balance !== null
+          ? `${profile.token_balance} tokens`
+          : "—",
       icon: Coins,
     },
     {
@@ -49,44 +87,28 @@ export default async function DashboardPage() {
       icon: Bot,
     },
     {
-      label: "Agent Language",
-      value: profile?.agent_language || "en",
-      icon: Globe,
-    },
-    {
       label: "Telnyx Number",
       value: profile?.telnyx_number || "Not assigned",
       icon: Phone,
-    },
-    {
-      label: "Member Since",
-      value: profile?.created_at
-        ? new Date(profile.created_at).toLocaleDateString("en-US", {
-            year: "numeric",
-            month: "long",
-            day: "numeric",
-          })
-        : "—",
-      icon: Calendar,
     },
   ];
 
   return (
     <div>
-      {/* Welcome */}
+      {/* Welcome Header */}
       <div className="mb-8">
         <h2 className="text-2xl font-bold text-white">
           Welcome back
-          {profile?.business_name ? `, ${profile.business_name}` : ""}
+          {!loading && profile?.business_name ? `, ${profile.business_name}` : ""}
         </h2>
         <p className="mt-1 text-sm text-[#9CA3AF]">
           Here&apos;s an overview of your account
         </p>
       </div>
 
-      {/* Profile Cards Grid */}
+      {/* 3 Stat Cards Grid */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {cards.map((card) => (
+        {statCards.map((card) => (
           <div
             key={card.label}
             className="rounded-xl border border-[#1E1E2A] bg-[#111118] p-5 transition-colors hover:border-[#2563EB]/30"
@@ -99,14 +121,25 @@ export default async function DashboardPage() {
                 <p className="text-xs font-medium uppercase tracking-wider text-[#9CA3AF]">
                   {card.label}
                 </p>
-                <p className="mt-0.5 truncate text-sm font-semibold text-white">
-                  {card.value}
-                </p>
+                {loading ? (
+                  <div className="mt-1 h-5 w-28 rounded bg-[#1F2937] animate-pulse" />
+                ) : (
+                  <p className="mt-0.5 truncate text-sm font-semibold text-white">
+                    {error ? "—" : card.value}
+                  </p>
+                )}
               </div>
             </div>
           </div>
         ))}
       </div>
+
+      {/* Error state message below cards */}
+      {error && (
+        <p className="mt-4 text-sm font-medium text-red-500">
+          {error}
+        </p>
+      )}
     </div>
   );
 }
