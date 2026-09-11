@@ -28,7 +28,10 @@ CREATE POLICY "Users can update own profile"
   ON public.profiles FOR UPDATE
   USING (auth.uid() = id);
 
--- 5. Trigger function: auto-create profile on signup
+-- 5. Grant permissions to authenticated role (RLS restricts rows)
+GRANT SELECT, UPDATE ON public.profiles TO authenticated;
+
+-- 6. Trigger function: auto-create profile on signup
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -42,7 +45,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- 6. Trigger: fire after new auth.users row is inserted
+-- 7. Trigger: fire after new auth.users row is inserted
 CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW
