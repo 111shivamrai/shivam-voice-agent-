@@ -21,7 +21,7 @@ import Link from "next/link";
 const navItems = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { label: "How it Works", href: "/dashboard/how-it-works", icon: BookOpen },
-  { label: "Documents", href: "/dashboard/documents", icon: FileText },
+  { label: "Knowledge Base", href: "/dashboard/documents", icon: FileText },
   { label: "Calls", href: "/dashboard/calls", icon: Phone },
   { label: "Billing", href: "/dashboard/billing", icon: CreditCard },
   { label: "Settings", href: "/dashboard/settings", icon: Settings },
