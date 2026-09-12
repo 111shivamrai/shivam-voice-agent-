@@ -46,6 +46,7 @@ describe('DocumentsController', () => {
         chunks_created: 4,
         filename: 'test-document-1789211140000.pdf',
       }),
+      listDocuments: jest.fn().mockResolvedValue([]),
       extractText: jest.fn(),
       chunkText: jest.fn(),
       generateEmbedding: jest.fn(),
@@ -411,6 +412,169 @@ describe('DocumentsController', () => {
           clientId: 'malicious-attacker-id',
         }),
       );
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────
+  // 9. GET /api/documents (list)
+  // ────────────────────────────────────────────────────────────
+  describe('GET /api/documents', () => {
+    it('returns documents for the authenticated client', async () => {
+      const mockDocs = [
+        {
+          filename: 'doc-1.pdf',
+          original_filename: 'Doc 1.pdf',
+          chunks_count: 5,
+          created_at: '2026-09-12T10:00:00.000Z',
+        },
+        {
+          filename: 'doc-2.pdf',
+          original_filename: 'Doc 2.pdf',
+          chunks_count: 2,
+          created_at: '2026-09-12T11:00:00.000Z',
+        },
+      ];
+
+      mockDocumentsService.listDocuments.mockResolvedValueOnce(mockDocs);
+
+      const mockReq = {
+        user: { id: 'client-alpha-123' },
+        headers: {},
+      } as unknown as Request;
+
+      const response = await controller.list(mockReq);
+
+      expect(mockDocumentsService.listDocuments).toHaveBeenCalledWith(
+        'client-alpha-123',
+      );
+      expect(response).toEqual({
+        success: true,
+        documents: mockDocs,
+      });
+    });
+
+    it('excludes another client documents and queries strictly by authenticated client', async () => {
+      mockDocumentsService.listDocuments.mockResolvedValueOnce([]);
+
+      const mockReq = {
+        user: { id: 'client-current' },
+        headers: {},
+      } as unknown as Request;
+
+      await controller.list(mockReq);
+
+      expect(mockDocumentsService.listDocuments).toHaveBeenCalledWith(
+        'client-current',
+      );
+      expect(mockDocumentsService.listDocuments).not.toHaveBeenCalledWith(
+        'client-other',
+      );
+    });
+
+    it('ignores any clientId/client_id in query params or body', async () => {
+      mockDocumentsService.listDocuments.mockResolvedValueOnce([]);
+
+      const mockReq = {
+        user: { id: 'legit-authenticated-user' },
+        query: {
+          clientId: 'attacker-client-query',
+          client_id: 'attacker-client-query-2',
+        },
+        body: {
+          clientId: 'attacker-client-body',
+        },
+        headers: {},
+      } as unknown as Request;
+
+      await controller.list(mockReq);
+
+      expect(mockDocumentsService.listDocuments).toHaveBeenCalledWith(
+        'legit-authenticated-user',
+      );
+      expect(mockDocumentsService.listDocuments).not.toHaveBeenCalledWith(
+        'attacker-client-query',
+      );
+      expect(mockDocumentsService.listDocuments).not.toHaveBeenCalledWith(
+        'attacker-client-body',
+      );
+    });
+
+    it('returns empty array when client has no documents', async () => {
+      mockDocumentsService.listDocuments.mockResolvedValueOnce([]);
+
+      const mockReq = {
+        user: { id: 'client-with-no-docs' },
+        headers: {},
+      } as unknown as Request;
+
+      const response = await controller.list(mockReq);
+
+      expect(response).toEqual({
+        success: true,
+        documents: [],
+      });
+    });
+
+    it('resolves authenticated identity from Bearer token via Supabase Auth', async () => {
+      mockDocumentsService.listDocuments.mockResolvedValueOnce([]);
+
+      const mockReq = {
+        headers: {
+          authorization: 'Bearer supabase.token.list',
+        },
+      } as unknown as Request;
+
+      mockGetUser.mockResolvedValueOnce({
+        data: {
+          user: { id: 'supabase-token-client' },
+        },
+        error: null,
+      });
+
+      const response = await controller.list(mockReq);
+
+      expect(mockGetUser).toHaveBeenCalledWith('supabase.token.list');
+      expect(mockDocumentsService.listDocuments).toHaveBeenCalledWith(
+        'supabase-token-client',
+      );
+      expect(response).toEqual({
+        success: true,
+        documents: [],
+      });
+    });
+
+    it('throws UnauthorizedException (401) for unauthenticated requests', async () => {
+      const mockReq = {
+        headers: {},
+      } as unknown as Request;
+
+      await expect(controller.list(mockReq)).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(mockDocumentsService.listDocuments).not.toHaveBeenCalled();
+    });
+
+    it('throws sanitized InternalServerErrorException (500) on service/database failure', async () => {
+      mockDocumentsService.listDocuments.mockRejectedValue(
+        new Error('Database query failure: confidential_error_details'),
+      );
+
+      const mockReq = {
+        user: { id: 'client-err' },
+        headers: {},
+      } as unknown as Request;
+
+      await expect(controller.list(mockReq)).rejects.toThrow(
+        InternalServerErrorException,
+      );
+
+      try {
+        await controller.list(mockReq);
+      } catch (err: unknown) {
+        const error = err as Error;
+        expect(error.message).not.toContain('confidential_error_details');
+        expect(error.message).toContain('Failed to retrieve documents');
+      }
     });
   });
 });

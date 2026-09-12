@@ -1,5 +1,6 @@
 import {
   Controller,
+  Get,
   Post,
   UseInterceptors,
   UploadedFile,
@@ -16,7 +17,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import 'multer';
 import type { Request } from 'express';
-import { DocumentsService } from './documents.service.js';
+import { DocumentsService, type DocumentSummary } from './documents.service.js';
 import { SupabaseService } from '../supabase/supabase.service.js';
 
 export const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
@@ -25,6 +26,11 @@ export interface UploadResponse {
   success: boolean;
   chunks_created: number;
   filename: string;
+}
+
+export interface ListDocumentsResponse {
+  success: boolean;
+  documents: DocumentSummary[];
 }
 
 @Controller('api/documents')
@@ -179,4 +185,32 @@ export class DocumentsController {
       );
     }
   }
+
+  @Get()
+  @HttpCode(HttpStatus.OK)
+  async list(@Req() req: Request): Promise<ListDocumentsResponse> {
+    // 1. Resolve and enforce authenticated client identity
+    const authenticatedClientId =
+      await this.resolveAuthenticatedClientId(req);
+
+    // 2. Query documents belonging strictly to the authenticated client
+    try {
+      const documents =
+        await this.documentsService.listDocuments(authenticatedClientId);
+
+      return {
+        success: true,
+        documents,
+      };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.error(
+        `Document listing error for client ${authenticatedClientId}: ${message}`,
+      );
+      throw new InternalServerErrorException(
+        'Failed to retrieve documents. Please try again later.',
+      );
+    }
+  }
 }
+

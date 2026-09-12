@@ -10,6 +10,13 @@ export interface ProcessAndStoreResult {
   filename: string;
 }
 
+export interface DocumentSummary {
+  filename: string;
+  original_filename: string;
+  chunks_count: number;
+  created_at: string;
+}
+
 interface DocumentChunkInsert {
   client_id: string;
   filename: string;
@@ -395,4 +402,60 @@ export class DocumentsService {
       );
     }
   }
+
+  // ──────────────────────────────────────────────────────────────
+  // METHOD 5: List and group documents by client ID
+  // ──────────────────────────────────────────────────────────────
+
+  async listDocuments(clientId: string): Promise<DocumentSummary[]> {
+    this.logger.log(`Listing documents for client: ${clientId}`);
+
+    const supabase = this.supabaseService.getAdminClient();
+    const { data, error } = await supabase
+      .from('document_chunks')
+      .select('filename, original_filename, created_at')
+      .eq('client_id', clientId)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      this.logger.error(
+        `Failed to retrieve document chunks for client ${clientId}: ${error.message}`,
+      );
+      throw new Error('Failed to retrieve documents.');
+    }
+
+    if (!data || data.length === 0) {
+      return [];
+    }
+
+    const documentsMap = new Map<string, DocumentSummary>();
+
+    for (const chunk of data as {
+      filename: string;
+      original_filename?: string;
+      created_at?: string;
+    }[]) {
+      const existing = documentsMap.get(chunk.filename);
+      if (existing) {
+        existing.chunks_count += 1;
+        // Keep the earliest created_at timestamp for the document
+        if (chunk.created_at && chunk.created_at < existing.created_at) {
+          existing.created_at = chunk.created_at;
+        }
+      } else {
+        documentsMap.set(chunk.filename, {
+          filename: chunk.filename,
+          original_filename: chunk.original_filename || chunk.filename,
+          chunks_count: 1,
+          created_at: chunk.created_at || new Date().toISOString(),
+        });
+      }
+    }
+
+    return Array.from(documentsMap.values()).sort(
+      (a, b) =>
+        new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+    );
+  }
 }
+

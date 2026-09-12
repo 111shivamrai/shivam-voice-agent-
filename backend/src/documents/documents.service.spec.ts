@@ -74,6 +74,9 @@ function getTesseractRecognize(): jest.Mock {
 
 let supabaseInsert: jest.Mock;
 let supabaseDelete: jest.Mock;
+let supabaseSelect: jest.Mock;
+let selectEqMock: jest.Mock;
+let selectOrderMock: jest.Mock;
 
 function makeMockSupabaseClient() {
   const selectBuilder = {
@@ -94,10 +97,17 @@ function makeMockSupabaseClient() {
   deleteBuilder.eq.mockReturnValue(deleteBuilder);
   supabaseDelete = jest.fn().mockReturnValue(deleteBuilder);
 
+  selectOrderMock = jest.fn().mockResolvedValue({ data: [], error: null });
+  const orderChain = { order: selectOrderMock };
+  selectEqMock = jest.fn().mockReturnValue(orderChain);
+  const eqChain = { eq: selectEqMock };
+  supabaseSelect = jest.fn().mockReturnValue(eqChain);
+
   return {
     from: jest.fn().mockReturnValue({
       insert: supabaseInsert,
       delete: supabaseDelete,
+      select: supabaseSelect,
     }),
   };
 }
@@ -445,6 +455,98 @@ describe('DocumentsService', () => {
       const clientIdCall = eqCalls.find(([key]) => key === 'client_id');
       expect(clientIdCall).toBeDefined();
       expect(clientIdCall![1]).toBe('client-isolation-test');
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────
+  // 15. listDocuments
+  // ────────────────────────────────────────────────────────────
+  describe('listDocuments', () => {
+    it('queries document_chunks filtered strictly by clientId and ordered by created_at', async () => {
+      selectOrderMock.mockResolvedValueOnce({
+        data: [],
+        error: null,
+      });
+
+      await service.listDocuments('client-alpha-100');
+
+      expect(supabaseSelect).toHaveBeenCalledWith(
+        'filename, original_filename, created_at',
+      );
+      expect(selectEqMock).toHaveBeenCalledWith('client_id', 'client-alpha-100');
+      expect(selectOrderMock).toHaveBeenCalledWith('created_at', {
+        ascending: false,
+      });
+    });
+
+    it('groups multiple chunks belonging to the same document and aggregates chunk count', async () => {
+      selectOrderMock.mockResolvedValueOnce({
+        data: [
+          {
+            filename: 'handbook-1.pdf',
+            original_filename: 'Employee Handbook.pdf',
+            created_at: '2026-09-12T10:00:00.000Z',
+          },
+          {
+            filename: 'handbook-1.pdf',
+            original_filename: 'Employee Handbook.pdf',
+            created_at: '2026-09-12T10:01:00.000Z',
+          },
+          {
+            filename: 'handbook-1.pdf',
+            original_filename: 'Employee Handbook.pdf',
+            created_at: '2026-09-12T10:02:00.000Z',
+          },
+          {
+            filename: 'guide-2.pdf',
+            original_filename: 'User Guide.pdf',
+            created_at: '2026-09-12T11:00:00.000Z',
+          },
+          {
+            filename: 'guide-2.pdf',
+            original_filename: 'User Guide.pdf',
+            created_at: '2026-09-12T11:01:00.000Z',
+          },
+        ],
+        error: null,
+      });
+
+      const documents = await service.listDocuments('client-beta-200');
+
+      expect(documents).toHaveLength(2);
+
+      const handbook = documents.find((d) => d.filename === 'handbook-1.pdf');
+      expect(handbook).toBeDefined();
+      expect(handbook?.original_filename).toBe('Employee Handbook.pdf');
+      expect(handbook?.chunks_count).toBe(3);
+      expect(handbook?.created_at).toBe('2026-09-12T10:00:00.000Z');
+
+      const guide = documents.find((d) => d.filename === 'guide-2.pdf');
+      expect(guide).toBeDefined();
+      expect(guide?.original_filename).toBe('User Guide.pdf');
+      expect(guide?.chunks_count).toBe(2);
+      expect(guide?.created_at).toBe('2026-09-12T11:00:00.000Z');
+    });
+
+    it('returns an empty array when no chunks exist for client', async () => {
+      selectOrderMock.mockResolvedValueOnce({
+        data: [],
+        error: null,
+      });
+
+      const documents = await service.listDocuments('client-empty');
+      expect(documents).toEqual([]);
+    });
+
+    it('throws error when database query fails', async () => {
+      selectOrderMock.mockResolvedValueOnce({
+        data: null,
+        error: { message: 'Database query failure' },
+      });
+
+      await expect(service.listDocuments('client-fail')).rejects.toThrow(
+        'Failed to retrieve documents.',
+      );
     });
   });
 });
