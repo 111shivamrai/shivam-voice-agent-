@@ -28,7 +28,7 @@ import {
 } from './documents.service.js';
 import { SupabaseService } from '../supabase/supabase.service.js';
 
-export const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+export const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
 
 export interface UploadResponse {
   success: boolean;

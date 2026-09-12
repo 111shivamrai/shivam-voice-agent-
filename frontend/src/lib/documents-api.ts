@@ -39,7 +39,7 @@ export interface SearchDocumentsResponse {
   results: SearchResultChunk[];
 }
 
-export const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+export const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
 
 /**
  * Resolves the backend base URL.
@@ -135,7 +135,7 @@ export async function uploadDocument(file: File): Promise<UploadResponse> {
   if (file.size > MAX_FILE_SIZE) {
     const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
     throw new Error(
-      `File size (${sizeMb} MB) exceeds the maximum allowed limit of 10 MB.`
+      `File size (${sizeMb} MB) exceeds the maximum allowed limit of 5 MB.`
     );
   }
 

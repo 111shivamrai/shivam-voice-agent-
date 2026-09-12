@@ -121,7 +121,7 @@ export default function DocumentsPage() {
     if (file.size > MAX_FILE_SIZE) {
       const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
       setUploadError(
-        `File size (${sizeMb} MB) exceeds the 10 MB limit. Please choose a smaller file.`
+        `File size (${sizeMb} MB) exceeds the 5 MB limit. Please choose a smaller file.`
       );
       setSelectedFile(null);
       return;
@@ -320,7 +320,7 @@ export default function DocumentsPage() {
               Upload Document
             </h3>
             <p className="text-xs text-[#9CA3AF]">
-              Support PDF format up to 10 MB. Text will be extracted, chunked,
+              Support PDF format up to 5 MB. Text will be extracted, chunked,
               and vectorized.
             </p>
           </div>
@@ -365,7 +365,7 @@ export default function DocumentsPage() {
               Click to browse or drag and drop a PDF
             </p>
             <p className="mt-1 text-xs text-[#9CA3AF]">
-              PDF only &bull; Up to 10 MB per document
+              PDF only &bull; Up to 5 MB per document
             </p>
           </div>
 
