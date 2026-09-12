@@ -4,6 +4,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import configuration from './config/configuration';
 import { SupabaseModule } from './supabase/supabase.module';
+import { DocumentsModule } from './documents/documents.module';
 
 @Module({
   imports: [
@@ -12,8 +13,10 @@ import { SupabaseModule } from './supabase/supabase.module';
       load: [configuration],
     }),
     SupabaseModule,
+    DocumentsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
 })
 export class AppModule {}
+
