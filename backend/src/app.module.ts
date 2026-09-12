@@ -5,6 +5,7 @@ import { AppService } from './app.service';
 import configuration from './config/configuration';
 import { SupabaseModule } from './supabase/supabase.module';
 import { DocumentsModule } from './documents/documents.module';
+import { PaymentsModule } from './payments/payments.module.js';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { DocumentsModule } from './documents/documents.module';
     }),
     SupabaseModule,
     DocumentsModule,
+    PaymentsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
