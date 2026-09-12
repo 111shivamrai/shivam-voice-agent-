@@ -2,10 +2,13 @@ import {
   Controller,
   Get,
   Post,
+  Delete,
+  Param,
   UseInterceptors,
   UploadedFile,
   Req,
   BadRequestException,
+  NotFoundException,
   PayloadTooLargeException,
   UnsupportedMediaTypeException,
   UnauthorizedException,
@@ -31,6 +34,12 @@ export interface UploadResponse {
 export interface ListDocumentsResponse {
   success: boolean;
   documents: DocumentSummary[];
+}
+
+export interface DeleteDocumentResponse {
+  success: boolean;
+  filename: string;
+  deleted_chunks: number;
 }
 
 @Controller('api/documents')
@@ -212,5 +221,54 @@ export class DocumentsController {
       );
     }
   }
+
+  @Delete(':filename')
+  @HttpCode(HttpStatus.OK)
+  async delete(
+    @Param('filename') filename: string,
+    @Req() req: Request,
+  ): Promise<DeleteDocumentResponse> {
+    // 1. Validate filename param
+    if (!filename || filename.trim() === '') {
+      throw new BadRequestException('Filename parameter is required.');
+    }
+
+    // 2. Resolve and enforce authenticated client identity
+    const authenticatedClientId =
+      await this.resolveAuthenticatedClientId(req);
+
+    // 3. Delete document belonging strictly to the authenticated client
+    try {
+      const result = await this.documentsService.deleteDocument(
+        filename.trim(),
+        authenticatedClientId,
+      );
+
+      if (result.deleted_chunks === 0) {
+        throw new NotFoundException(
+          `Document "${filename}" not found.`,
+        );
+      }
+
+      return {
+        success: true,
+        filename: result.filename,
+        deleted_chunks: result.deleted_chunks,
+      };
+    } catch (err: unknown) {
+      if (err instanceof NotFoundException) {
+        throw err;
+      }
+
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.error(
+        `Error deleting document "${filename}" for client ${authenticatedClientId}: ${message}`,
+      );
+      throw new InternalServerErrorException(
+        'Failed to delete document. Please try again later.',
+      );
+    }
+  }
 }
+
 

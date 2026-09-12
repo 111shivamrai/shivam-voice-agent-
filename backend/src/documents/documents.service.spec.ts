@@ -77,6 +77,8 @@ let supabaseDelete: jest.Mock;
 let supabaseSelect: jest.Mock;
 let selectEqMock: jest.Mock;
 let selectOrderMock: jest.Mock;
+let deleteSelectMock: jest.Mock;
+let deleteEqMock: jest.Mock;
 
 function makeMockSupabaseClient() {
   const selectBuilder = {
@@ -89,12 +91,15 @@ function makeMockSupabaseClient() {
 
   supabaseInsert = jest.fn().mockReturnValue(insertBuilder);
 
+  deleteSelectMock = jest.fn().mockResolvedValue({ data: [], error: null });
+  deleteEqMock = jest.fn();
   const deleteBuilder = {
-    eq: jest.fn(),
+    eq: deleteEqMock,
+    select: deleteSelectMock,
     error: null,
   };
   // each .eq() call returns the same builder (for chaining)
-  deleteBuilder.eq.mockReturnValue(deleteBuilder);
+  deleteEqMock.mockReturnValue(deleteBuilder);
   supabaseDelete = jest.fn().mockReturnValue(deleteBuilder);
 
   selectOrderMock = jest.fn().mockResolvedValue({ data: [], error: null });
@@ -549,4 +554,65 @@ describe('DocumentsService', () => {
       );
     });
   });
+
+  // ────────────────────────────────────────────────────────────
+  // 16. deleteDocument
+  // ────────────────────────────────────────────────────────────
+  describe('deleteDocument', () => {
+    it('deletes document chunks matching filename and clientId and returns count', async () => {
+      deleteSelectMock.mockResolvedValueOnce({
+        data: [{ id: 'chunk-1' }, { id: 'chunk-2' }, { id: 'chunk-3' }],
+        error: null,
+      });
+
+      const result = await service.deleteDocument(
+        'user-manual-1789211140000.pdf',
+        'client-xyz-777',
+      );
+
+      expect(supabaseDelete).toHaveBeenCalledTimes(1);
+      expect(deleteEqMock).toHaveBeenCalledWith(
+        'filename',
+        'user-manual-1789211140000.pdf',
+      );
+      expect(deleteEqMock).toHaveBeenCalledWith(
+        'client_id',
+        'client-xyz-777',
+      );
+      expect(deleteSelectMock).toHaveBeenCalledWith('id');
+      expect(result).toEqual({
+        filename: 'user-manual-1789211140000.pdf',
+        deleted_chunks: 3,
+      });
+    });
+
+    it('returns deleted_chunks = 0 when document does not exist for client', async () => {
+      deleteSelectMock.mockResolvedValueOnce({
+        data: [],
+        error: null,
+      });
+
+      const result = await service.deleteDocument(
+        'nonexistent.pdf',
+        'client-xyz-777',
+      );
+
+      expect(result).toEqual({
+        filename: 'nonexistent.pdf',
+        deleted_chunks: 0,
+      });
+    });
+
+    it('throws an error when database delete fails', async () => {
+      deleteSelectMock.mockResolvedValueOnce({
+        data: null,
+        error: { message: 'Database delete failed' },
+      });
+
+      await expect(
+        service.deleteDocument('fail.pdf', 'client-xyz-777'),
+      ).rejects.toThrow('Failed to delete document.');
+    });
+  });
 });
+

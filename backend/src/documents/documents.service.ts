@@ -17,6 +17,11 @@ export interface DocumentSummary {
   created_at: string;
 }
 
+export interface DeleteDocumentResult {
+  filename: string;
+  deleted_chunks: number;
+}
+
 interface DocumentChunkInsert {
   client_id: string;
   filename: string;
@@ -457,5 +462,44 @@ export class DocumentsService {
         new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
     );
   }
+
+  // ──────────────────────────────────────────────────────────────
+  // METHOD 6: Delete document chunks by filename and client ID
+  // ──────────────────────────────────────────────────────────────
+
+  async deleteDocument(
+    filename: string,
+    clientId: string,
+  ): Promise<DeleteDocumentResult> {
+    this.logger.log(
+      `Deleting document "${filename}" for client: ${clientId}`,
+    );
+
+    const supabase = this.supabaseService.getAdminClient();
+    const { data, error } = await supabase
+      .from('document_chunks')
+      .delete()
+      .eq('filename', filename)
+      .eq('client_id', clientId)
+      .select('id');
+
+    if (error) {
+      this.logger.error(
+        `Failed to delete document "${filename}" for client ${clientId}: ${error.message}`,
+      );
+      throw new Error('Failed to delete document.');
+    }
+
+    const deletedChunks = data ? data.length : 0;
+    this.logger.log(
+      `Deleted ${deletedChunks} chunks for document "${filename}" (client=${clientId})`,
+    );
+
+    return {
+      filename,
+      deleted_chunks: deletedChunks,
+    };
+  }
 }
+
 

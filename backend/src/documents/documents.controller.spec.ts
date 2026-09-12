@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  NotFoundException,
   PayloadTooLargeException,
   UnsupportedMediaTypeException,
   UnauthorizedException,
@@ -47,6 +48,10 @@ describe('DocumentsController', () => {
         filename: 'test-document-1789211140000.pdf',
       }),
       listDocuments: jest.fn().mockResolvedValue([]),
+      deleteDocument: jest.fn().mockResolvedValue({
+        filename: 'test-document-1789211140000.pdf',
+        deleted_chunks: 1,
+      }),
       extractText: jest.fn(),
       chunkText: jest.fn(),
       generateEmbedding: jest.fn(),
@@ -574,6 +579,166 @@ describe('DocumentsController', () => {
         const error = err as Error;
         expect(error.message).not.toContain('confidential_error_details');
         expect(error.message).toContain('Failed to retrieve documents');
+      }
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────
+  // 10. DELETE /api/documents/:filename
+  // ────────────────────────────────────────────────────────────
+  describe('DELETE /api/documents/:filename', () => {
+    it('successfully deletes document and returns deleted_chunks count', async () => {
+      mockDocumentsService.deleteDocument.mockResolvedValueOnce({
+        filename: 'report-1789211140000.pdf',
+        deleted_chunks: 4,
+      });
+
+      const mockReq = {
+        user: { id: 'client-valid-user' },
+        headers: {},
+      } as unknown as Request;
+
+      const response = await controller.delete(
+        'report-1789211140000.pdf',
+        mockReq,
+      );
+
+      expect(mockDocumentsService.deleteDocument).toHaveBeenCalledWith(
+        'report-1789211140000.pdf',
+        'client-valid-user',
+      );
+      expect(response).toEqual({
+        success: true,
+        filename: 'report-1789211140000.pdf',
+        deleted_chunks: 4,
+      });
+    });
+
+    it('throws NotFoundException (404) when document does not exist for client', async () => {
+      mockDocumentsService.deleteDocument.mockResolvedValueOnce({
+        filename: 'nonexistent.pdf',
+        deleted_chunks: 0,
+      });
+
+      const mockReq = {
+        user: { id: 'client-valid-user' },
+        headers: {},
+      } as unknown as Request;
+
+      let caughtError: unknown;
+      try {
+        await controller.delete('nonexistent.pdf', mockReq);
+      } catch (err) {
+        caughtError = err;
+      }
+
+      expect(caughtError).toBeInstanceOf(NotFoundException);
+    });
+
+    it('throws BadRequestException (400) when filename is empty', async () => {
+      const mockReq = {
+        user: { id: 'client-valid-user' },
+        headers: {},
+      } as unknown as Request;
+
+      await expect(controller.delete('', mockReq)).rejects.toThrow(
+        BadRequestException,
+      );
+      await expect(controller.delete('   ', mockReq)).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(mockDocumentsService.deleteDocument).not.toHaveBeenCalled();
+    });
+
+    it('throws UnauthorizedException (401) for unauthenticated requests', async () => {
+      const mockReq = {
+        headers: {},
+      } as unknown as Request;
+
+      await expect(
+        controller.delete('file.pdf', mockReq),
+      ).rejects.toThrow(UnauthorizedException);
+      expect(mockDocumentsService.deleteDocument).not.toHaveBeenCalled();
+    });
+
+    it('resolves authenticated user from Bearer token via Supabase Auth', async () => {
+      mockDocumentsService.deleteDocument.mockResolvedValueOnce({
+        filename: 'file.pdf',
+        deleted_chunks: 2,
+      });
+
+      const mockReq = {
+        headers: {
+          authorization: 'Bearer supabase.token.delete',
+        },
+      } as unknown as Request;
+
+      mockGetUser.mockResolvedValueOnce({
+        data: {
+          user: { id: 'supabase-delete-user' },
+        },
+        error: null,
+      });
+
+      const response = await controller.delete('file.pdf', mockReq);
+
+      expect(mockGetUser).toHaveBeenCalledWith('supabase.token.delete');
+      expect(mockDocumentsService.deleteDocument).toHaveBeenCalledWith(
+        'file.pdf',
+        'supabase-delete-user',
+      );
+      expect(response).toEqual({
+        success: true,
+        filename: 'file.pdf',
+        deleted_chunks: 2,
+      });
+    });
+
+    it('strictly passes authenticated client ID, ignoring any query/body clientId', async () => {
+      mockDocumentsService.deleteDocument.mockResolvedValueOnce({
+        filename: 'file.pdf',
+        deleted_chunks: 1,
+      });
+
+      const mockReq = {
+        user: { id: 'legit-user' },
+        query: { clientId: 'malicious-user' },
+        body: { clientId: 'malicious-user' },
+        headers: {},
+      } as unknown as Request;
+
+      await controller.delete('file.pdf', mockReq);
+
+      expect(mockDocumentsService.deleteDocument).toHaveBeenCalledWith(
+        'file.pdf',
+        'legit-user',
+      );
+      expect(mockDocumentsService.deleteDocument).not.toHaveBeenCalledWith(
+        'file.pdf',
+        'malicious-user',
+      );
+    });
+
+    it('throws sanitized InternalServerErrorException (500) on database/service failure', async () => {
+      mockDocumentsService.deleteDocument.mockRejectedValue(
+        new Error('Database delete failure: confidential_key'),
+      );
+
+      const mockReq = {
+        user: { id: 'client-err' },
+        headers: {},
+      } as unknown as Request;
+
+      await expect(
+        controller.delete('file.pdf', mockReq),
+      ).rejects.toThrow(InternalServerErrorException);
+
+      try {
+        await controller.delete('file.pdf', mockReq);
+      } catch (err: unknown) {
+        const error = err as Error;
+        expect(error.message).not.toContain('confidential_key');
+        expect(error.message).toContain('Failed to delete document');
       }
     });
   });
