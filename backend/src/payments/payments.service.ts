@@ -314,13 +314,100 @@ export class PaymentsService {
   }
 
   /**
-   * 7. Admin: Atomically approve a payment request and credit minutes exactly once
+   * 7. Admin: Atomically approve a payment request and credit minutes exactly once.
+   *
+   * Attempts PostgreSQL stored procedure `approve_payment_request` for single-transaction
+   * ACID atomicity (row-level lock + balance increment + status transition). If the RPC
+   * function is not yet present in the database, falls back to atomic application check-and-set.
    */
   async approvePayment(
     paymentId: string,
     adminNote?: string,
   ): Promise<ApprovePaymentResponse> {
     this.logger.log(`Admin approving payment ${paymentId}`);
+    const supabase = this.supabaseService.getAdminClient();
+
+    // 1. Attempt atomic PostgreSQL stored procedure (single transaction)
+    try {
+      const { data: rpcData, error: rpcError } = await supabase.rpc(
+        'approve_payment_request',
+        {
+          p_payment_id: paymentId,
+          p_admin_note: adminNote ?? null,
+        },
+      );
+
+      if (!rpcError && rpcData) {
+        if (!rpcData.success) {
+          if (rpcData.error === 'not_found') {
+            throw new NotFoundException(
+              `Payment request with ID "${paymentId}" not found.`,
+            );
+          }
+          if (rpcData.error === 'already_processed') {
+            throw new BadRequestException('This payment has already been processed');
+          }
+          throw new BadRequestException(
+            rpcData.message || 'Payment approval failed.',
+          );
+        }
+
+        this.logger.log(
+          `Payment ${paymentId} approved atomically via database RPC. Credited ${rpcData.minutes_added} minutes to client ${rpcData.client_id} (new balance: ${rpcData.new_balance})`,
+        );
+
+        return {
+          message: 'Approved. Minutes added to client account.',
+          minutes_added: rpcData.minutes_added,
+        };
+      }
+
+      // If RPC is missing from database schema, log and fallback gracefully
+      if (
+        rpcError &&
+        (rpcError.message?.includes('approve_payment_request') ||
+          rpcError.code === 'PGRST202' ||
+          rpcError.message?.includes('not found') ||
+          rpcError.details?.includes('function'))
+      ) {
+        this.logger.warn(
+          `approve_payment_request RPC not found in database: ${rpcError.message}. Executing atomic application fallback.`,
+        );
+        return this.approvePaymentFallback(paymentId, adminNote);
+      }
+
+      if (rpcError) {
+        this.logger.error(
+          `Error executing approve_payment_request RPC for payment ${paymentId}: ${rpcError.message}`,
+        );
+        throw new InternalServerErrorException(
+          rpcError.message || 'Database transaction error approving payment.',
+        );
+      }
+    } catch (err: unknown) {
+      if (
+        err instanceof NotFoundException ||
+        err instanceof BadRequestException ||
+        err instanceof InternalServerErrorException
+      ) {
+        throw err;
+      }
+      this.logger.warn(
+        `RPC execution failed with exception: ${err instanceof Error ? err.message : String(err)}. Falling back to check-and-set.`,
+      );
+      return this.approvePaymentFallback(paymentId, adminNote);
+    }
+
+    return this.approvePaymentFallback(paymentId, adminNote);
+  }
+
+  /**
+   * Application-level check-and-set fallback for approving payment
+   */
+  private async approvePaymentFallback(
+    paymentId: string,
+    adminNote?: string,
+  ): Promise<ApprovePaymentResponse> {
     const supabase = this.supabaseService.getAdminClient();
 
     // 1. Locate payment request
@@ -407,7 +494,7 @@ export class PaymentsService {
     }
 
     this.logger.log(
-      `Payment ${paymentId} successfully approved. Credited ${updated.minutes_requested} minutes to client ${updated.client_id} (new balance: ${newBalance})`,
+      `Payment ${paymentId} successfully approved via fallback. Credited ${updated.minutes_requested} minutes to client ${updated.client_id} (new balance: ${newBalance})`,
     );
 
     return {

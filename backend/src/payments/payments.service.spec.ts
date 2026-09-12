@@ -14,6 +14,13 @@ describe('PaymentsService', () => {
   beforeEach(async () => {
     mockSupabaseClient = {
       from: jest.fn(),
+      rpc: jest.fn().mockResolvedValue({
+        data: null,
+        error: {
+          message: 'function public.approve_payment_request does not exist',
+          code: 'PGRST202',
+        },
+      }),
     };
 
     const mockSupabaseService = {
@@ -519,6 +526,79 @@ describe('PaymentsService', () => {
 
       await expect(service.approvePayment('non-existent')).rejects.toThrow(
         NotFoundException,
+      );
+    });
+
+    // -----------------------------------------------------------------------
+    // Atomic PostgreSQL Stored Procedure (RPC) Tests
+    // -----------------------------------------------------------------------
+    it('Scenario 27 (RPC): executes atomic single-transaction approval via approve_payment_request RPC', async () => {
+      mockSupabaseClient.rpc.mockResolvedValue({
+        data: {
+          success: true,
+          minutes_added: 100,
+          new_balance: 145,
+          client_id: 'client-1',
+        },
+        error: null,
+      });
+
+      const res = await service.approvePayment('pay-100', 'Verified on bank portal');
+
+      expect(res).toEqual({
+        message: 'Approved. Minutes added to client account.',
+        minutes_added: 100,
+      });
+
+      expect(mockSupabaseClient.rpc).toHaveBeenCalledWith('approve_payment_request', {
+        p_payment_id: 'pay-100',
+        p_admin_note: 'Verified on bank portal',
+      });
+    });
+
+    it('Scenario 29 (RPC): double approval rejected with BadRequestException when RPC returns already_processed', async () => {
+      mockSupabaseClient.rpc.mockResolvedValue({
+        data: {
+          success: false,
+          error: 'already_processed',
+          message: 'This payment has already been processed',
+        },
+        error: null,
+      });
+
+      await expect(service.approvePayment('pay-100')).rejects.toThrow(
+        BadRequestException,
+      );
+      await expect(service.approvePayment('pay-100')).rejects.toThrow(
+        'This payment has already been processed',
+      );
+    });
+
+    it('Scenario 8 (RPC): rejects approval with NotFoundException when RPC returns not_found', async () => {
+      mockSupabaseClient.rpc.mockResolvedValue({
+        data: {
+          success: false,
+          error: 'not_found',
+          message: 'Payment request not found.',
+        },
+        error: null,
+      });
+
+      await expect(service.approvePayment('pay-999')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('Scenario 9 (RPC Rollback): raises InternalServerErrorException if database transaction fails', async () => {
+      mockSupabaseClient.rpc.mockResolvedValue({
+        data: null,
+        error: {
+          message: 'Transaction deadlock or profile constraint violation',
+        },
+      });
+
+      await expect(service.approvePayment('pay-100')).rejects.toThrow(
+        InternalServerErrorException,
       );
     });
   });

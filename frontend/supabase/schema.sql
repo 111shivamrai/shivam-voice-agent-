@@ -203,3 +203,72 @@ END $$;
 GRANT SELECT, INSERT ON public.payment_requests TO authenticated;
 GRANT ALL ON public.payment_requests TO service_role;
 
+-- 20. Atomic Payment Approval Function (Single-Transaction ACID execution)
+CREATE OR REPLACE FUNCTION public.approve_payment_request(
+  p_payment_id UUID,
+  p_admin_note TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_payment RECORD;
+  v_new_balance INTEGER;
+BEGIN
+  -- 1. Lock payment request row for update (blocks concurrent executions)
+  SELECT id, client_id, minutes_requested, status
+  INTO v_payment
+  FROM public.payment_requests
+  WHERE id = p_payment_id
+  FOR UPDATE;
+
+  -- Payment does not exist
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object(
+      'success', false,
+      'error', 'not_found',
+      'message', 'Payment request not found.'
+    );
+  END IF;
+
+  -- Payment is not in pending status (already approved or rejected)
+  IF v_payment.status <> 'pending' THEN
+    RETURN jsonb_build_object(
+      'success', false,
+      'error', 'already_processed',
+      'message', 'This payment has already been processed'
+    );
+  END IF;
+
+  -- 2. Atomically credit minutes to profiles.token_balance
+  UPDATE public.profiles
+  SET token_balance = COALESCE(token_balance, 0) + v_payment.minutes_requested
+  WHERE id = v_payment.client_id
+  RETURNING token_balance INTO v_new_balance;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Client profile not found for client %', v_payment.client_id;
+  END IF;
+
+  -- 3. Transition payment request status to approved
+  UPDATE public.payment_requests
+  SET 
+    status = 'approved',
+    resolved_at = NOW(),
+    admin_note = COALESCE(p_admin_note, admin_note)
+  WHERE id = p_payment_id;
+
+  -- 4. Return success and exact credit metrics
+  RETURN jsonb_build_object(
+    'success', true,
+    'minutes_added', v_payment.minutes_requested,
+    'new_balance', v_new_balance,
+    'client_id', v_payment.client_id
+  );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.approve_payment_request(UUID, TEXT) TO service_role;
+
+
