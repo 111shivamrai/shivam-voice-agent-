@@ -79,6 +79,7 @@ let selectEqMock: jest.Mock;
 let selectOrderMock: jest.Mock;
 let deleteSelectMock: jest.Mock;
 let deleteEqMock: jest.Mock;
+let supabaseRpc: jest.Mock;
 
 function makeMockSupabaseClient() {
   const selectBuilder = {
@@ -108,12 +109,15 @@ function makeMockSupabaseClient() {
   const eqChain = { eq: selectEqMock };
   supabaseSelect = jest.fn().mockReturnValue(eqChain);
 
+  supabaseRpc = jest.fn().mockResolvedValue({ data: [], error: null });
+
   return {
     from: jest.fn().mockReturnValue({
       insert: supabaseInsert,
       delete: supabaseDelete,
       select: supabaseSelect,
     }),
+    rpc: supabaseRpc,
   };
 }
 
@@ -614,5 +618,127 @@ describe('DocumentsService', () => {
       ).rejects.toThrow('Failed to delete document.');
     });
   });
+
+  // ────────────────────────────────────────────────────────────
+  // 17. searchDocuments
+  // ────────────────────────────────────────────────────────────
+  describe('searchDocuments', () => {
+    const fakeEmbedding = Array.from({ length: 1536 }, () => 0.05);
+
+    beforeEach(() => {
+      getEmbeddingsCreateMock().mockResolvedValue({
+        data: [{ embedding: fakeEmbedding }],
+      });
+    });
+
+    it('generates query embedding and calls match_documents RPC with default parameters', async () => {
+      const mockMatches = [
+        {
+          id: 'chunk-1',
+          filename: 'guide-1789211140000.pdf',
+          chunk_text: 'This is the relevant text',
+          similarity: 0.88,
+        },
+      ];
+
+      supabaseRpc.mockResolvedValueOnce({
+        data: mockMatches,
+        error: null,
+      });
+
+      const results = await service.searchDocuments(
+        'how do I set up billing?',
+        'tenant-alpha',
+      );
+
+      expect(getEmbeddingsCreateMock()).toHaveBeenCalledWith(
+        expect.objectContaining({
+          input: 'how do I set up billing?',
+          model: 'text-embedding-3-small',
+        }),
+      );
+
+      expect(supabaseRpc).toHaveBeenCalledWith('match_documents', {
+        query_embedding: fakeEmbedding,
+        match_client_id: 'tenant-alpha',
+        match_count: 5,
+        match_threshold: 0.7,
+      });
+
+      expect(results).toEqual(mockMatches);
+    });
+
+    it('passes custom match_count and match_threshold when provided', async () => {
+      supabaseRpc.mockResolvedValueOnce({
+        data: [],
+        error: null,
+      });
+
+      await service.searchDocuments(
+        'custom threshold query',
+        'tenant-beta',
+        10,
+        0.85,
+      );
+
+      expect(supabaseRpc).toHaveBeenCalledWith('match_documents', {
+        query_embedding: fakeEmbedding,
+        match_client_id: 'tenant-beta',
+        match_count: 10,
+        match_threshold: 0.85,
+      });
+    });
+
+    it('returns empty array when no documents match threshold', async () => {
+      supabaseRpc.mockResolvedValueOnce({
+        data: [],
+        error: null,
+      });
+
+      const results = await service.searchDocuments(
+        'unmatched query',
+        'tenant-gamma',
+      );
+
+      expect(results).toEqual([]);
+    });
+
+    it('throws error when query is empty or whitespace', async () => {
+      await expect(service.searchDocuments('', 'tenant-1')).rejects.toThrow(
+        'Search query must be a non-empty string.',
+      );
+
+      await expect(service.searchDocuments('   ', 'tenant-1')).rejects.toThrow(
+        'Search query must be a non-empty string.',
+      );
+
+      expect(getEmbeddingsCreateMock()).not.toHaveBeenCalled();
+      expect(supabaseRpc).not.toHaveBeenCalled();
+    });
+
+    it('throws error when embedding generation fails', async () => {
+      getEmbeddingsCreateMock().mockRejectedValue(
+        new Error('OpenAI service unavailable'),
+      );
+
+      await expect(
+        service.searchDocuments('query', 'tenant-1'),
+      ).rejects.toThrow('Embedding generation failed');
+
+      expect(supabaseRpc).not.toHaveBeenCalled();
+    });
+
+    it('throws error when match_documents RPC returns an error', async () => {
+      supabaseRpc.mockResolvedValueOnce({
+        data: null,
+        error: { message: 'Database RPC function error' },
+      });
+
+      await expect(
+        service.searchDocuments('query', 'tenant-1'),
+      ).rejects.toThrow('Vector search failed.');
+    });
+  });
 });
+
 

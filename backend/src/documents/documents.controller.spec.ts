@@ -52,6 +52,7 @@ describe('DocumentsController', () => {
         filename: 'test-document-1789211140000.pdf',
         deleted_chunks: 1,
       }),
+      searchDocuments: jest.fn().mockResolvedValue([]),
       extractText: jest.fn(),
       chunkText: jest.fn(),
       generateEmbedding: jest.fn(),
@@ -739,6 +740,234 @@ describe('DocumentsController', () => {
         const error = err as Error;
         expect(error.message).not.toContain('confidential_key');
         expect(error.message).toContain('Failed to delete document');
+      }
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────
+  // 11. POST /api/documents/search
+  // ────────────────────────────────────────────────────────────
+  describe('POST /api/documents/search', () => {
+    it('successfully performs semantic search and returns results with default count=5 and threshold=0.7', async () => {
+      const mockResults = [
+        {
+          id: 'chunk-1',
+          filename: 'doc.pdf',
+          chunk_text: 'Sample chunk text',
+          similarity: 0.91,
+        },
+      ];
+
+      mockDocumentsService.searchDocuments.mockResolvedValueOnce(mockResults);
+
+      const mockReq = {
+        user: { id: 'client-auth-1' },
+        headers: {},
+      } as unknown as Request;
+
+      const response = await controller.search(
+        { query: 'What is the refund policy?' },
+        mockReq,
+      );
+
+      expect(mockDocumentsService.searchDocuments).toHaveBeenCalledWith(
+        'What is the refund policy?',
+        'client-auth-1',
+        5,
+        0.7,
+      );
+      expect(response).toEqual({
+        success: true,
+        results: mockResults,
+      });
+    });
+
+    it('passes custom match_count and match_threshold when provided', async () => {
+      mockDocumentsService.searchDocuments.mockResolvedValueOnce([]);
+
+      const mockReq = {
+        user: { id: 'client-auth-1' },
+        headers: {},
+      } as unknown as Request;
+
+      await controller.search(
+        {
+          query: 'Shipping options',
+          match_count: 8,
+          match_threshold: 0.85,
+        },
+        mockReq,
+      );
+
+      expect(mockDocumentsService.searchDocuments).toHaveBeenCalledWith(
+        'Shipping options',
+        'client-auth-1',
+        8,
+        0.85,
+      );
+    });
+
+    it('returns empty array when no documents match', async () => {
+      mockDocumentsService.searchDocuments.mockResolvedValueOnce([]);
+
+      const mockReq = {
+        user: { id: 'client-auth-1' },
+        headers: {},
+      } as unknown as Request;
+
+      const response = await controller.search(
+        { query: 'something completely absent' },
+        mockReq,
+      );
+
+      expect(response).toEqual({
+        success: true,
+        results: [],
+      });
+    });
+
+    it('rejects empty query with BadRequestException (400)', async () => {
+      const mockReq = {
+        user: { id: 'client-auth-1' },
+        headers: {},
+      } as unknown as Request;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await expect(controller.search({ query: '' } as any, mockReq)).rejects.toThrow(
+        BadRequestException,
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await expect(controller.search({} as any, mockReq)).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(mockDocumentsService.searchDocuments).not.toHaveBeenCalled();
+    });
+
+    it('rejects whitespace-only query with BadRequestException (400)', async () => {
+      const mockReq = {
+        user: { id: 'client-auth-1' },
+        headers: {},
+      } as unknown as Request;
+
+      await expect(
+        controller.search({ query: '    ' }, mockReq),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockDocumentsService.searchDocuments).not.toHaveBeenCalled();
+    });
+
+    it('rejects invalid match_count or match_threshold with BadRequestException (400)', async () => {
+      const mockReq = {
+        user: { id: 'client-auth-1' },
+        headers: {},
+      } as unknown as Request;
+
+      await expect(
+        controller.search({ query: 'test', match_count: -1 }, mockReq),
+      ).rejects.toThrow(BadRequestException);
+
+      await expect(
+        controller.search({ query: 'test', match_threshold: 2 }, mockReq),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockDocumentsService.searchDocuments).not.toHaveBeenCalled();
+    });
+
+    it('rejects unauthenticated requests with UnauthorizedException (401)', async () => {
+      const mockReq = {
+        headers: {},
+      } as unknown as Request;
+
+      await expect(
+        controller.search({ query: 'secret data' }, mockReq),
+      ).rejects.toThrow(UnauthorizedException);
+      expect(mockDocumentsService.searchDocuments).not.toHaveBeenCalled();
+    });
+
+    it('resolves authenticated user from Bearer token via Supabase Auth', async () => {
+      mockDocumentsService.searchDocuments.mockResolvedValueOnce([]);
+
+      const mockReq = {
+        headers: {
+          authorization: 'Bearer supabase.token.search',
+        },
+      } as unknown as Request;
+
+      mockGetUser.mockResolvedValueOnce({
+        data: {
+          user: { id: 'supabase-search-user' },
+        },
+        error: null,
+      });
+
+      const response = await controller.search(
+        { query: 'test query' },
+        mockReq,
+      );
+
+      expect(mockGetUser).toHaveBeenCalledWith('supabase.token.search');
+      expect(mockDocumentsService.searchDocuments).toHaveBeenCalledWith(
+        'test query',
+        'supabase-search-user',
+        5,
+        0.7,
+      );
+      expect(response).toEqual({
+        success: true,
+        results: [],
+      });
+    });
+
+    it('strictly passes authenticated client ID, ignoring any caller-supplied clientId/client_id', async () => {
+      mockDocumentsService.searchDocuments.mockResolvedValueOnce([]);
+
+      const mockReq = {
+        user: { id: 'legit-search-user' },
+        query: { clientId: 'malicious-search-tenant' },
+        body: {
+          query: 'search query',
+          clientId: 'malicious-search-tenant',
+          client_id: 'malicious-search-tenant-2',
+        },
+        headers: {},
+      } as unknown as Request;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await controller.search(mockReq.body as any, mockReq);
+
+      expect(mockDocumentsService.searchDocuments).toHaveBeenCalledWith(
+        'search query',
+        'legit-search-user',
+        5,
+        0.7,
+      );
+      expect(mockDocumentsService.searchDocuments).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'malicious-search-tenant',
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+
+    it('sanitizes embedding / database errors to InternalServerErrorException (500)', async () => {
+      mockDocumentsService.searchDocuments.mockRejectedValue(
+        new Error('Downstream error: confidential_embedding_key_leak'),
+      );
+
+      const mockReq = {
+        user: { id: 'client-err' },
+        headers: {},
+      } as unknown as Request;
+
+      await expect(
+        controller.search({ query: 'test' }, mockReq),
+      ).rejects.toThrow(InternalServerErrorException);
+
+      try {
+        await controller.search({ query: 'test' }, mockReq);
+      } catch (err: unknown) {
+        const error = err as Error;
+        expect(error.message).not.toContain('confidential_embedding_key_leak');
+        expect(error.message).toContain('Search failed');
       }
     });
   });

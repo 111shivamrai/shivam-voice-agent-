@@ -16,11 +16,16 @@ import {
   Logger,
   HttpCode,
   HttpStatus,
+  Body,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import 'multer';
 import type { Request } from 'express';
-import { DocumentsService, type DocumentSummary } from './documents.service.js';
+import {
+  DocumentsService,
+  type DocumentSummary,
+  type SearchResultChunk,
+} from './documents.service.js';
 import { SupabaseService } from '../supabase/supabase.service.js';
 
 export const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
@@ -40,6 +45,17 @@ export interface DeleteDocumentResponse {
   success: boolean;
   filename: string;
   deleted_chunks: number;
+}
+
+export interface SearchDocumentsDto {
+  query: string;
+  match_count?: number;
+  match_threshold?: number;
+}
+
+export interface SearchDocumentsResponse {
+  success: boolean;
+  results: SearchResultChunk[];
 }
 
 @Controller('api/documents')
@@ -269,6 +285,75 @@ export class DocumentsController {
       );
     }
   }
+
+  @Post('search')
+  @HttpCode(HttpStatus.OK)
+  async search(
+    @Body() body: SearchDocumentsDto,
+    @Req() req: Request,
+  ): Promise<SearchDocumentsResponse> {
+    // 1. Validate query
+    if (
+      !body ||
+      typeof body.query !== 'string' ||
+      body.query.trim() === ''
+    ) {
+      throw new BadRequestException(
+        'Search query is required and cannot be empty.',
+      );
+    }
+
+    // 2. Validate optional count and threshold
+    let matchCount = 5;
+    if (body.match_count !== undefined) {
+      if (typeof body.match_count !== 'number' || body.match_count <= 0) {
+        throw new BadRequestException('match_count must be a positive number.');
+      }
+      matchCount = Math.min(Math.floor(body.match_count), 50);
+    }
+
+    let matchThreshold = 0.7;
+    if (body.match_threshold !== undefined) {
+      if (
+        typeof body.match_threshold !== 'number' ||
+        body.match_threshold < 0 ||
+        body.match_threshold > 1
+      ) {
+        throw new BadRequestException(
+          'match_threshold must be a number between 0 and 1.',
+        );
+      }
+      matchThreshold = body.match_threshold;
+    }
+
+    // 3. Resolve and enforce authenticated client identity
+    const authenticatedClientId =
+      await this.resolveAuthenticatedClientId(req);
+
+    // 4. Perform semantic search strictly for the authenticated client
+    try {
+      const results = await this.documentsService.searchDocuments(
+        body.query.trim(),
+        authenticatedClientId,
+        matchCount,
+        matchThreshold,
+      );
+
+      return {
+        success: true,
+        results,
+      };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.error(
+        `Search failed for client ${authenticatedClientId}: ${message}`,
+      );
+      throw new InternalServerErrorException(
+        'Search failed. Please try again later.',
+      );
+    }
+  }
 }
+
 
 

@@ -22,6 +22,15 @@ export interface DeleteDocumentResult {
   deleted_chunks: number;
 }
 
+export interface SearchResultChunk {
+  id?: string;
+  filename: string;
+  original_filename?: string;
+  chunk_text: string;
+  chunk_index?: number;
+  similarity: number;
+}
+
 interface DocumentChunkInsert {
   client_id: string;
   filename: string;
@@ -500,6 +509,59 @@ export class DocumentsService {
       deleted_chunks: deletedChunks,
     };
   }
+
+  // ──────────────────────────────────────────────────────────────
+  // METHOD 7: Semantic vector search using match_documents RPC
+  // ──────────────────────────────────────────────────────────────
+
+  async searchDocuments(
+    query: string,
+    clientId: string,
+    matchCount: number = 5,
+    matchThreshold: number = 0.7,
+  ): Promise<SearchResultChunk[]> {
+    const trimmedQuery = query?.trim();
+    if (!trimmedQuery) {
+      throw new Error('Search query must be a non-empty string.');
+    }
+
+    this.logger.log(
+      `Performing semantic search for client "${clientId}" with query: "${trimmedQuery.substring(0, 50)}..." (count=${matchCount}, threshold=${matchThreshold})`,
+    );
+
+    // 1. Generate query embedding using text-embedding-3-small
+    const queryEmbedding = await this.generateEmbedding(trimmedQuery);
+
+    // 2. Query Supabase vector similarity via match_documents RPC
+    const supabase = this.supabaseService.getAdminClient();
+    const { data, error } = await supabase.rpc('match_documents', {
+      query_embedding: queryEmbedding,
+      match_client_id: clientId,
+      match_count: matchCount,
+      match_threshold: matchThreshold,
+    });
+
+    if (error) {
+      this.logger.error(
+        `match_documents RPC error for client "${clientId}": ${error.message}`,
+      );
+      throw new Error('Vector search failed.');
+    }
+
+    if (!data || !Array.isArray(data) || data.length === 0) {
+      this.logger.log(
+        `Search completed for client "${clientId}": 0 matching chunks found`,
+      );
+      return [];
+    }
+
+    this.logger.log(
+      `Search completed for client "${clientId}": ${data.length} matching chunk(s) found`,
+    );
+
+    return data as SearchResultChunk[];
+  }
 }
+
 
 
