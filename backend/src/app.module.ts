@@ -6,6 +6,7 @@ import configuration from './config/configuration';
 import { SupabaseModule } from './supabase/supabase.module';
 import { DocumentsModule } from './documents/documents.module';
 import { PaymentsModule } from './payments/payments.module.js';
+import { SarvamModule } from './sarvam/sarvam.module.js';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { PaymentsModule } from './payments/payments.module.js';
     SupabaseModule,
     DocumentsModule,
     PaymentsModule,
+    SarvamModule,
   ],
   controllers: [AppController],
   providers: [AppService],
