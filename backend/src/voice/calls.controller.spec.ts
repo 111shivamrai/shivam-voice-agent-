@@ -14,7 +14,7 @@ describe('CallsController', () => {
     initiateOutboundCall: jest.fn().mockResolvedValue({
       callId: 'call-out-1',
       telnyxCallId: 'v3:call_out',
-      status: 'initiated',
+      status: 'in_progress',
       direction: 'outbound',
       callerNumber: '+15551234567',
       calledNumber: '+15559876543',

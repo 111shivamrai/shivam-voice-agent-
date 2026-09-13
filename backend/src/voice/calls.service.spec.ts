@@ -447,7 +447,7 @@ describe('CallsService', () => {
       expect(mockCallsDb.length).toBe(1);
       expect(mockCallsDb[0].client_id).toBe(mockClientId);
       expect(mockCallsDb[0].direction).toBe('inbound');
-      expect(mockCallsDb[0].status).toBe('in-progress');
+      expect(mockCallsDb[0].status).toBe('in_progress');
 
       // Verify VoiceSession
       const session = voiceSessionService.getSession(mockCallControlId);
@@ -769,7 +769,7 @@ describe('CallsService', () => {
       });
 
       expect(res.direction).toBe('outbound');
-      expect(res.status).toBe('initiated');
+      expect(res.status).toBe('in_progress');
       expect(res.calledNumber).toBe('+15558887777');
       expect(res.callerNumber).toBe(mockTelnyxNumber);
 

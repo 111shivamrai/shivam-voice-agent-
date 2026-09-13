@@ -4,15 +4,7 @@
 
 export type CallDirection = 'inbound' | 'outbound';
 
-export type CallStatus =
-  | 'initiated'
-  | 'ringing'
-  | 'in-progress'
-  | 'completed'
-  | 'failed'
-  | 'busy'
-  | 'no-answer'
-  | 'canceled';
+export type CallStatus = 'in_progress' | 'completed' | 'failed' | 'dropped';
 
 export interface CallTranscriptItem {
   role: 'user' | 'assistant' | 'system';
@@ -41,7 +33,6 @@ export interface CallRecord {
 
 export interface InitiateOutboundCallDto {
   to: string;
-  from?: string;
 }
 
 export interface InitiateOutboundCallResponse {

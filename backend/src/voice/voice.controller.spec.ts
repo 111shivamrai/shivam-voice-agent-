@@ -220,11 +220,11 @@ describe('VoiceController', () => {
       // Test the error sanitizer
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const sanitized = (controller as any).sanitizeErrorMessage(
-        'Crash in token Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9 and sk_c7uo11o5_fakeKey',
+        'Crash in token Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9 and sk_mock_test_token_123',
       );
 
       expect(sanitized).not.toContain('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9');
-      expect(sanitized).not.toContain('sk_c7uo11o5_fakeKey');
+      expect(sanitized).not.toContain('sk_mock_test_token_123');
       expect(sanitized).toContain('[REDACTED]');
     });
 

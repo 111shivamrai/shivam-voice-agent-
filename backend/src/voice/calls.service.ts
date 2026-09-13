@@ -4,6 +4,7 @@ import { SupabaseService } from '../supabase/supabase.service.js';
 import { SarvamService } from '../sarvam/sarvam.service.js';
 import { VoiceSessionService } from './voice-session.service.js';
 import { ConversationService } from './conversation.service.js';
+import { enforceMaxSentences } from './conversation.types.js';
 import {
   CallRecord,
   CallTranscriptItem,
@@ -52,6 +53,9 @@ export class CallsService {
 
   // In-memory active call states indexed by call_control_id
   private readonly activeCalls = new Map<string, ActiveCallState>();
+
+  // Active call hard deadline supervisor timers
+  private readonly activeCallTimers = new Map<string, NodeJS.Timeout>();
 
   // Idempotency tracking for processed webhook event IDs
   private readonly processedEvents = new Map<string, number>();
@@ -291,6 +295,7 @@ export class CallsService {
    * 1. Resolves tenant client by called number (profiles.telnyx_number).
    * 2. Checks token balance > 0 (prevents zero-balance calls).
    * 3. Answers call and creates database record & voice session.
+   * 4. Schedules server-side 10-minute hard deadline & balance-exhaustion supervisor.
    */
   public async handleCallInitiated(callPayload: Record<string, unknown>): Promise<void> {
     const callControlId = String(callPayload.call_control_id ?? '');
@@ -342,7 +347,7 @@ export class CallsService {
       caller_number: from,
       called_number: to,
       telnyx_call_id: callControlId,
-      status: 'in-progress',
+      status: 'in_progress',
       language_used: language,
       started_at: now,
       transcript: [],
@@ -370,9 +375,47 @@ export class CallsService {
       startedAt: now,
       warningGiven: false,
       language,
-      status: 'in-progress',
+      status: 'in_progress',
       transcript: [],
     });
+
+    // Server-side Hard Deadline & Balance Supervisor Timer
+    // Enforces hard termination at 10-minutes OR available balance limit even if caller is silent
+    const maxCallSeconds = Math.min(MAX_CALL_DURATION_SECONDS, balance * 60);
+    this.clearSupervisorTimer(callControlId);
+
+    const supervisorTimer = setTimeout(async () => {
+      this.logger.warn(
+        `Call supervisor deadline reached for control ID ${callControlId} (${maxCallSeconds}s). Enforcing termination.`,
+      );
+      try {
+        const active = this.activeCalls.get(callControlId);
+        const isHindi = active?.language.includes('hindi');
+        const limitMsg =
+          maxCallSeconds < MAX_CALL_DURATION_SECONDS
+            ? isHindi
+              ? CALL_MESSAGES.INSUFFICIENT_BALANCE_HI
+              : CALL_MESSAGES.INSUFFICIENT_BALANCE_EN
+            : isHindi
+              ? CALL_MESSAGES.MAX_DURATION_HI
+              : CALL_MESSAGES.MAX_DURATION_EN;
+
+        await this.speakText(callControlId, {
+          payload: limitMsg,
+          language: isHindi ? 'hi-IN' : 'en-US',
+        });
+      } catch {
+        // ignore speech error during teardown
+      }
+
+      await this.hangupCall(callControlId);
+      await this.handleCallHangup({ call_control_id: callControlId });
+    }, maxCallSeconds * 1000);
+
+    if (supervisorTimer && typeof supervisorTimer === 'object' && 'unref' in supervisorTimer) {
+      supervisorTimer.unref();
+    }
+    this.activeCallTimers.set(callControlId, supervisorTimer);
 
     this.logger.log(`Inbound call connected for client ${clientId} (ControlId: ${callControlId})`);
   }
@@ -410,17 +453,19 @@ export class CallsService {
 
   /**
    * Handles call hangup:
-   * 1. Calculates call duration and minutes used.
-   * 2. Atomically deducts minutes via Supabase deduct_minutes RPC.
-   * 3. Updates database call record with final status and transcript.
-   * 4. Removes session from VoiceSessionService and active call state.
+   * 1. Clears supervisor timer.
+   * 2. Calculates call duration and minutes used.
+   * 3. Atomically deducts minutes via Supabase deduct_minutes RPC.
+   * 4. Updates database call record with final status and transcript.
+   * 5. Removes session from VoiceSessionService and active call state.
    */
   public async handleCallHangup(callPayload: Record<string, unknown>): Promise<void> {
     const callControlId = String(callPayload.call_control_id ?? '');
-    const activeCall = this.activeCalls.get(callControlId);
+    this.clearSupervisorTimer(callControlId);
 
+    const activeCall = this.activeCalls.get(callControlId);
     const endedAt = new Date();
-    let startedAt = activeCall ? activeCall.startedAt : endedAt;
+    const startedAt = activeCall ? activeCall.startedAt : endedAt;
     const clientId = activeCall ? activeCall.clientId : null;
 
     // Calculate duration
@@ -462,11 +507,12 @@ export class CallsService {
    * Processes caller speech utterance (audio buffer or text):
    * Enforces:
    * - 10-minute maximum call duration limit
-   * - 3-minute remaining duration warning
+   * - Dynamic language detection based on caller speech
+   * - 3-minute remaining duration warning strictly enforcing <= 2 short sentences
    * - Consecutive empty STT safety (3 = prompt, 5 = terminate)
    * - 10 conversation turns limit
    * - Document-only RAG response via ConversationService
-   * - Sarvam TTS audio synthesis
+   * - Sarvam TTS audio synthesis and Telnyx audio delivery
    */
   public async processCallerUtterance(
     callControlId: string,
@@ -585,10 +631,21 @@ export class CallsService {
     // Valid speech received -> reset empty STT count
     this.voiceSessionService.resetEmptySttCount(callControlId);
 
-    // 4. Conversation Turn Limit Check (Max 10 turns)
+    // 4. Dynamic Caller Language Detection
+    const detectedLanguage = this.sarvamService.detectLanguage(transcriptText);
+    if (detectedLanguage) {
+      activeCall.language = detectedLanguage;
+      this.voiceSessionService.updateSession(callControlId, {
+        language: detectedLanguage === 'hindi' || detectedLanguage === 'hinglish' ? 'hindi' : 'english',
+      });
+    }
+
+    const callerIsHindi = activeCall.language.includes('hindi');
+
+    // 5. Conversation Turn Limit Check (Max 10 turns)
     const turnResult = this.voiceSessionService.incrementTurn(callControlId);
     if (!turnResult.allowed) {
-      const maxTurnMsg = isHindi ? CALL_MESSAGES.MAX_TURNS_HI : CALL_MESSAGES.MAX_TURNS_EN;
+      const maxTurnMsg = callerIsHindi ? CALL_MESSAGES.MAX_TURNS_HI : CALL_MESSAGES.MAX_TURNS_EN;
       activeCall.transcript.push({
         role: 'assistant',
         content: maxTurnMsg,
@@ -598,7 +655,7 @@ export class CallsService {
 
       await this.speakText(callControlId, {
         payload: maxTurnMsg,
-        language: isHindi ? 'hi-IN' : 'en-US',
+        language: callerIsHindi ? 'hi-IN' : 'en-US',
       });
       await this.hangupCall(callControlId);
 
@@ -616,22 +673,23 @@ export class CallsService {
       timestamp: new Date().toISOString(),
     });
 
-    // 5. Generate RAG Answer from uploaded documents
+    // 6. Generate RAG Answer from uploaded documents (Grounded, Max 2 sentences)
     const conversationRes = await this.conversationService.generateResponse({
       clientId: activeCall.clientId,
       question: transcriptText,
-      language: isHindi ? 'hindi' : 'english',
+      language: callerIsHindi ? 'hindi' : 'english',
     });
 
     let finalAnswer = conversationRes.answer;
     let warningGivenNow = false;
 
-    // 6. Check 3-Minute Warning (triggers after 7 minutes / 420s)
+    // 7. Check 3-Minute Warning (triggers after 7 minutes / 420s)
+    // Strictly bounds combined output so it never violates the 2-sentence rule
     if (elapsedSeconds >= WARNING_TRIGGER_ELAPSED_SECONDS && !activeCall.warningGiven) {
       activeCall.warningGiven = true;
       warningGivenNow = true;
-      const warnMsg = isHindi ? CALL_MESSAGES.WARNING_3MIN_HI : CALL_MESSAGES.WARNING_3MIN_EN;
-      finalAnswer = `${finalAnswer} ${warnMsg}`;
+      const warnMsg = callerIsHindi ? CALL_MESSAGES.WARNING_3MIN_HI : CALL_MESSAGES.WARNING_3MIN_EN;
+      finalAnswer = enforceMaxSentences(`${finalAnswer} ${warnMsg}`, 2);
     }
 
     // Record assistant response in transcript
@@ -642,21 +700,23 @@ export class CallsService {
       source: conversationRes.source,
     });
 
-    // 7. Synthesize Audio via Sarvam TTS
+    // 8. Synthesize Audio via Sarvam Bulbul v3 TTS
     let audioBuffer: Buffer | undefined;
     try {
       const ttsResult = await this.sarvamService.textToSpeech(
         finalAnswer,
-        isHindi ? 'hi-IN' : 'en-IN',
+        callerIsHindi ? 'hi-IN' : 'en-IN',
       );
       audioBuffer = ttsResult.audioBuffer;
     } catch (err: unknown) {
       this.logger.warn(`Sarvam TTS synthesis failed, fallback to Telnyx speak: ${err}`);
-      await this.speakText(callControlId, {
-        payload: finalAnswer,
-        language: isHindi ? 'hi-IN' : 'en-US',
-      });
     }
+
+    // Deliver speech to caller over Telnyx
+    await this.speakText(callControlId, {
+      payload: finalAnswer,
+      language: callerIsHindi ? 'hi-IN' : 'en-US',
+    });
 
     return {
       responseAudio: audioBuffer,
@@ -675,8 +735,9 @@ export class CallsService {
    * Initiates an outbound call:
    * 1. Validates client balance > 0.
    * 2. Validates destination phone number (E.164).
-   * 3. Calls Telnyx API to dial destination.
-   * 4. Stores outbound call record in database.
+   * 3. Strictly enforces client assigned Telnyx number (prevents caller-ID spoofing).
+   * 4. Calls Telnyx API to dial destination.
+   * 5. Stores outbound call record in database.
    */
   public async initiateOutboundCall(
     clientId: string,
@@ -702,8 +763,8 @@ export class CallsService {
       throw new InsufficientBalanceException(clientId, balance);
     }
 
-    const fromNumber =
-      dto.from || profile.telnyx_number || this.getDefaultTelnyxPhoneNumber();
+    // Security: strictly use client's assigned telnyx number or system default (disallows arbitrary from override)
+    const fromNumber = profile.telnyx_number || this.getDefaultTelnyxPhoneNumber();
 
     if (!fromNumber) {
       throw new InvalidPhoneNumberException('No valid caller ID (from) phone number configured');
@@ -755,7 +816,7 @@ export class CallsService {
       caller_number: fromNumber,
       called_number: toNumber,
       telnyx_call_id: telnyxCallControlId,
-      status: 'initiated',
+      status: 'in_progress',
       language_used: (profile.agent_language ?? 'english').toLowerCase(),
       started_at: new Date(),
       transcript: [],
@@ -764,7 +825,7 @@ export class CallsService {
     return {
       callId: callRecord.id,
       telnyxCallId: telnyxCallControlId,
-      status: 'initiated',
+      status: 'in_progress',
       direction: 'outbound',
       callerNumber: fromNumber,
       calledNumber: toNumber,
@@ -895,7 +956,7 @@ export class CallsService {
         duration_seconds: record.duration_seconds ?? 0,
         minutes_used: record.minutes_used ?? 0,
         transcript: record.transcript ?? [],
-        status: record.status ?? 'initiated',
+        status: record.status ?? 'in_progress',
         language_used: record.language_used ?? 'english',
         started_at: record.started_at ?? new Date(),
       })
@@ -915,7 +976,7 @@ export class CallsService {
         minutes_used: record.minutes_used ?? 0,
         transcript: record.transcript ?? [],
         recording_url: null,
-        status: record.status ?? 'initiated',
+        status: record.status ?? 'in_progress',
         language_used: record.language_used ?? 'english',
         started_at: record.started_at ?? new Date(),
         ended_at: null,
@@ -992,12 +1053,24 @@ export class CallsService {
     }
   }
 
+  private clearSupervisorTimer(callControlId: string): void {
+    const timer = this.activeCallTimers.get(callControlId);
+    if (timer) {
+      clearTimeout(timer);
+      this.activeCallTimers.delete(callControlId);
+    }
+  }
+
   // Testing helpers
   public getActiveCall(callControlId: string): ActiveCallState | undefined {
     return this.activeCalls.get(callControlId);
   }
 
   public clearActiveCalls(): void {
+    for (const timer of this.activeCallTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.activeCallTimers.clear();
     this.activeCalls.clear();
     this.processedEvents.clear();
   }

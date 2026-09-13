@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS public.calls (
   minutes_used INTEGER DEFAULT 0,
   transcript JSONB DEFAULT '[]'::jsonb,
   recording_url TEXT DEFAULT NULL,
-  status TEXT DEFAULT 'initiated' CHECK (status IN ('initiated', 'ringing', 'in-progress', 'completed', 'failed', 'busy', 'no-answer', 'canceled')),
+  status TEXT DEFAULT 'in_progress' CHECK (status IN ('in_progress', 'completed', 'failed', 'dropped')),
   language_used TEXT DEFAULT 'english',
   started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   ended_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
