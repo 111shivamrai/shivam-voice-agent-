@@ -170,7 +170,52 @@ export class CallsService {
   }
 
   /**
-   * Starts gathering speech / audio recording from caller.
+   * Starts real-time bidirectional media streaming from Telnyx to our backend WebSocket gateway.
+   */
+  public async startMediaStreaming(callControlId: string): Promise<boolean> {
+    try {
+      const streamUrl = this.getBackendPublicStreamUrl(callControlId);
+      const res = await this.sendTelnyxAction(callControlId, 'streaming_start', {
+        stream_url: streamUrl,
+        stream_track: 'inbound_track',
+        stream_bidirectional_mode: 'rtp',
+        enable_dialogflow: false,
+      });
+      if (res.ok) {
+        this.logger.log(`Media streaming started for call ${callControlId} -> ${streamUrl}`);
+      }
+      return res.ok;
+    } catch (err: unknown) {
+      this.logger.error(`Failed to start media streaming on call ${callControlId}: ${err}`);
+      return false;
+    }
+  }
+
+  /**
+   * Stops real-time media streaming from Telnyx.
+   */
+  public async stopMediaStreaming(callControlId: string): Promise<boolean> {
+    try {
+      const res = await this.sendTelnyxAction(callControlId, 'streaming_stop', {});
+      return res.ok;
+    } catch (err: unknown) {
+      this.logger.debug?.(`Failed to stop media streaming on call ${callControlId}: ${err}`);
+      return false;
+    }
+  }
+
+  /**
+   * Gets WebSocket streaming URL based on BACKEND_URL configuration.
+   */
+  public getBackendPublicStreamUrl(callControlId?: string): string {
+    const httpUrl = this.getBackendPublicUrl();
+    const wsUrl = httpUrl.replace(/^https:\/\//i, 'wss://').replace(/^http:\/\//i, 'ws://');
+    const path = `${wsUrl}/voice/stream`;
+    return callControlId ? `${path}?call_control_id=${encodeURIComponent(callControlId)}` : path;
+  }
+
+  /**
+   * Starts gathering speech / audio recording from caller (legacy/fallback mode).
    */
   public async startGatherAudio(callControlId: string): Promise<boolean> {
     try {
@@ -258,18 +303,29 @@ export class CallsService {
 
   /**
    * Retrieves transient audio buffer for Telnyx streaming endpoint (GET /voice/audio/:audioId.wav).
+   * Supports single-use eviction upon consumption to prevent reuse or leaks.
    */
-  public getTransientAudio(audioId: string): Buffer | null {
+  public getTransientAudio(audioId: string, consume = false): Buffer | null {
     const cleanId = audioId.replace(/\.wav$/i, '');
     const entry = this.transientAudioMap.get(cleanId);
     if (!entry) {
       return null;
+    }
+    if (consume) {
+      this.transientAudioMap.delete(cleanId);
     }
     if (Date.now() > entry.expiresAt) {
       this.transientAudioMap.delete(cleanId);
       return null;
     }
     return entry.buffer;
+  }
+
+  /**
+   * Consumes transient audio buffer immediately (single-use token eviction).
+   */
+  public consumeTransientAudio(audioId: string): Buffer | null {
+    return this.getTransientAudio(audioId, true);
   }
 
   /**
@@ -581,6 +637,9 @@ export class CallsService {
         language: isHindi ? 'hi-IN' : 'en-US',
       });
     }
+
+    // Start real-time bidirectional media streaming from Telnyx to our WebSocket media gateway
+    await this.startMediaStreaming(callControlId);
   }
 
   /**
@@ -641,6 +700,7 @@ export class CallsService {
   public async handleCallHangup(callPayload: Record<string, unknown>): Promise<void> {
     const callControlId = String(callPayload.call_control_id ?? '');
     this.clearSupervisorTimer(callControlId);
+    await this.stopMediaStreaming(callControlId);
 
     const activeCall = this.activeCalls.get(callControlId);
     const endedAt = new Date();

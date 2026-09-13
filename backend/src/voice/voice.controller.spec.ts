@@ -36,6 +36,9 @@ describe('VoiceController', () => {
       embedText: jest.fn(),
     };
 
+    const mockTransientMap = new Map<string, Buffer>();
+    mockTransientMap.set('valid-audio-uuid', Buffer.from('RIFF_test_wav_buffer'));
+
     const mockCallsService = {
       handleTelnyxWebhook: jest.fn().mockImplementation(async (payload: any) => {
         const eventData = payload?.data ?? payload;
@@ -46,6 +49,21 @@ describe('VoiceController', () => {
           call_control_id: eventData?.payload?.call_control_id ?? payload?.call_control_id,
           message: 'Webhook received and acknowledged',
         };
+      }),
+      consumeTransientAudio: jest.fn().mockImplementation((id: string) => {
+        const buf = mockTransientMap.get(id);
+        if (buf) {
+          mockTransientMap.delete(id); // single-use eviction
+          return buf;
+        }
+        return null;
+      }),
+      getTransientAudio: jest.fn().mockImplementation((id: string) => {
+        return mockTransientMap.get(id) ?? null;
+      }),
+      processCallerUtterance: jest.fn().mockResolvedValue({
+        responseText: 'Agent response via controller',
+        source: 'rag',
       }),
     };
 
@@ -274,6 +292,45 @@ describe('VoiceController', () => {
       expect(result.status).toBe('acknowledged');
       // Spoofed client_id is not trusted or returned
       expect(result).not.toHaveProperty('client_id');
+    });
+  });
+
+  describe('Transient Audio & Utterance Streaming Endpoints', () => {
+    it('16. should stream audio with audio/wav and no-store headers and evict on single read', () => {
+      const mockRes = {
+        set: jest.fn(),
+      };
+
+      // First read: should succeed and set headers
+      const stream = controller.getAudioStream('valid-audio-uuid.wav', mockRes);
+      expect(stream).toBeDefined();
+      expect(mockRes.set).toHaveBeenCalledWith(
+        expect.objectContaining({
+          'Content-Type': 'audio/wav',
+          'Cache-Control': expect.stringContaining('no-store'),
+        }),
+      );
+
+      // Second read: should throw NotFoundException because audio was evicted on first read
+      expect(() => {
+        controller.getAudioStream('valid-audio-uuid.wav', mockRes);
+      }).toThrow();
+    });
+
+    it('17. should throw NotFoundException for non-existent or expired audio ID', () => {
+      const mockRes = { set: jest.fn() };
+      expect(() => {
+        controller.getAudioStream('non-existent-id', mockRes);
+      }).toThrow();
+    });
+
+    it('18. should process utterance input via POST /voice/calls/:callControlId/utterance', async () => {
+      const res = await controller.handleUtterance('v3:call_ctrl_123', {
+        transcript: 'Hello from direct bridge',
+      });
+
+      expect(res).toBeDefined();
+      expect(res.responseText).toBe('Agent response via controller');
     });
   });
 });

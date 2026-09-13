@@ -5,6 +5,8 @@ import { VoiceSessionModule } from './voice-session.module.js';
 import { ConversationModule } from './conversation.module.js';
 import { CallsService } from './calls.service.js';
 import { CallsController } from './calls.controller.js';
+import { MediaStreamService } from './media-stream.service.js';
+import { MediaStreamGateway } from './media-stream.gateway.js';
 
 @Module({
   imports: [
@@ -14,7 +16,8 @@ import { CallsController } from './calls.controller.js';
     ConversationModule,
   ],
   controllers: [CallsController],
-  providers: [CallsService],
-  exports: [CallsService],
+  providers: [CallsService, MediaStreamService, MediaStreamGateway],
+  exports: [CallsService, MediaStreamService, MediaStreamGateway],
 })
 export class CallsModule {}
+

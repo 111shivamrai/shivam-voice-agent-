@@ -61,7 +61,7 @@ export class VoiceController {
     @Res({ passthrough: true }) res: any,
   ): StreamableFile {
     const cleanId = audioId.replace(/\.wav$/i, '');
-    const buffer = this.callsService.getTransientAudio(cleanId);
+    const buffer = this.callsService.consumeTransientAudio(cleanId);
     if (!buffer) {
       throw new NotFoundException('Audio buffer expired or not found');
     }
