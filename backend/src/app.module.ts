@@ -8,6 +8,7 @@ import { DocumentsModule } from './documents/documents.module';
 import { PaymentsModule } from './payments/payments.module.js';
 import { SarvamModule } from './sarvam/sarvam.module.js';
 import { VoiceSessionModule } from './voice/voice-session.module.js';
+import { ConversationModule } from './voice/conversation.module.js';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { VoiceSessionModule } from './voice/voice-session.module.js';
     PaymentsModule,
     SarvamModule,
     VoiceSessionModule,
+    ConversationModule,
   ],
   controllers: [AppController],
   providers: [AppService],
