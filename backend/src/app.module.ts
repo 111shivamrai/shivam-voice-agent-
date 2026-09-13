@@ -7,6 +7,7 @@ import { SupabaseModule } from './supabase/supabase.module';
 import { DocumentsModule } from './documents/documents.module';
 import { PaymentsModule } from './payments/payments.module.js';
 import { SarvamModule } from './sarvam/sarvam.module.js';
+import { VoiceSessionModule } from './voice/voice-session.module.js';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { SarvamModule } from './sarvam/sarvam.module.js';
     DocumentsModule,
     PaymentsModule,
     SarvamModule,
+    VoiceSessionModule,
   ],
   controllers: [AppController],
   providers: [AppService],
