@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { randomUUID } from 'crypto';
 import { SupabaseService } from '../supabase/supabase.service.js';
 import { SarvamService } from '../sarvam/sarvam.service.js';
 import { VoiceSessionService } from './voice-session.service.js';
@@ -46,6 +47,11 @@ interface ActiveCallState {
   transcript: CallTranscriptItem[];
 }
 
+interface TransientAudioEntry {
+  buffer: Buffer;
+  expiresAt: number;
+}
+
 @Injectable()
 export class CallsService {
   private readonly logger = new Logger(CallsService.name);
@@ -56,6 +62,10 @@ export class CallsService {
 
   // Active call hard deadline supervisor timers
   private readonly activeCallTimers = new Map<string, NodeJS.Timeout>();
+
+  // Transient audio cache for streaming Sarvam Bulbul v3 WAV audio to Telnyx playback_start
+  private readonly transientAudioMap = new Map<string, TransientAudioEntry>();
+  private readonly audioTtlMs = 60 * 1000; // 60 seconds
 
   // Idempotency tracking for processed webhook event IDs
   private readonly processedEvents = new Map<string, number>();
@@ -100,6 +110,19 @@ export class CallsService {
     return connId?.trim();
   }
 
+  /**
+   * Safe retrieval of the backend public URL used for Telnyx media fetching.
+   */
+  public getBackendPublicUrl(): string {
+    const url =
+      this.configService.get<string>('BACKEND_URL') ??
+      this.configService.get<string>('APP_URL') ??
+      this.configService.get<string>('PUBLIC_URL') ??
+      this.configService.get<string>('backendUrl') ??
+      'http://localhost:3001';
+    return url.replace(/\/+$/, '');
+  }
+
   // ====================================================================
   // 1. Telnyx REST API Call Control Actions
   // ====================================================================
@@ -131,7 +154,41 @@ export class CallsService {
   }
 
   /**
-   * Speaks text to the caller using Telnyx Call Control.
+   * Plays back an audio URL into an active Telnyx call.
+   * This is the PRIMARY production mechanism to deliver Sarvam Bulbul v3 synthesized WAV audio.
+   */
+  public async playbackAudio(callControlId: string, audioUrl: string): Promise<boolean> {
+    try {
+      const res = await this.sendTelnyxAction(callControlId, 'playback_start', {
+        audio_url: audioUrl,
+      });
+      return res.ok;
+    } catch (err: unknown) {
+      this.logger.error(`Failed to playback audio on call ${callControlId}: ${err}`);
+      return false;
+    }
+  }
+
+  /**
+   * Starts gathering speech / audio recording from caller.
+   */
+  public async startGatherAudio(callControlId: string): Promise<boolean> {
+    try {
+      const res = await this.sendTelnyxAction(callControlId, 'gather_using_audio', {
+        audio_url: `${this.getBackendPublicUrl()}/voice/audio/silence.wav`,
+        inter_digit_timeout_millis: 3000,
+        maximum_digits: 1,
+        timeout_millis: 10000,
+      });
+      return res.ok;
+    } catch (err: unknown) {
+      this.logger.debug?.(`Failed to start audio gather on call ${callControlId}: ${err}`);
+      return false;
+    }
+  }
+
+  /**
+   * Emergency fallback only: Speaks text using Telnyx native TTS if Sarvam audio delivery fails.
    */
   public async speakText(
     callControlId: string,
@@ -151,21 +208,6 @@ export class CallsService {
   }
 
   /**
-   * Plays back an audio URL to the caller.
-   */
-  public async playbackAudio(callControlId: string, audioUrl: string): Promise<boolean> {
-    try {
-      const res = await this.sendTelnyxAction(callControlId, 'playback_start', {
-        audio_url: audioUrl,
-      });
-      return res.ok;
-    } catch (err: unknown) {
-      this.logger.error(`Failed to playback audio on call ${callControlId}: ${err}`);
-      return false;
-    }
-  }
-
-  /**
    * Helper to send action POST request to Telnyx Call Control API.
    */
   private async sendTelnyxAction(
@@ -175,7 +217,7 @@ export class CallsService {
   ): Promise<Response> {
     const apiKey = this.getTelnyxApiKey();
     if (!apiKey) {
-      this.logger.warn(`TELNYX_API_KEY is not configured. Action "${action}" skipped in mock mode.`);
+      this.logger.warn(`TELNYX_API_KEY is not configured. Action "${action}" executed in mock mode.`);
       return new Response(JSON.stringify({ status: 'mock_ok' }), { status: 200 });
     }
 
@@ -198,7 +240,65 @@ export class CallsService {
   }
 
   // ====================================================================
-  // 2. Webhook Ingestion & Orchestration
+  // 2. Transient Audio Cache & Sarvam Audio Playback Dispatch
+  // ====================================================================
+
+  /**
+   * Stores a Sarvam Bulbul v3 synthesized WAV audio buffer in transient memory and returns a single-use token ID.
+   */
+  public storeTransientAudio(buffer: Buffer): string {
+    this.cleanExpiredTransientAudio();
+    const audioId = randomUUID();
+    this.transientAudioMap.set(audioId, {
+      buffer,
+      expiresAt: Date.now() + this.audioTtlMs,
+    });
+    return audioId;
+  }
+
+  /**
+   * Retrieves transient audio buffer for Telnyx streaming endpoint (GET /voice/audio/:audioId.wav).
+   */
+  public getTransientAudio(audioId: string): Buffer | null {
+    const cleanId = audioId.replace(/\.wav$/i, '');
+    const entry = this.transientAudioMap.get(cleanId);
+    if (!entry) {
+      return null;
+    }
+    if (Date.now() > entry.expiresAt) {
+      this.transientAudioMap.delete(cleanId);
+      return null;
+    }
+    return entry.buffer;
+  }
+
+  /**
+   * Dispatches Sarvam Bulbul v3 generated audio to Telnyx playback_start action.
+   * This guarantees that Sarvam generated audio is delivered to the caller.
+   */
+  public async playbackSarvamAudio(callControlId: string, audioBuffer: Buffer): Promise<boolean> {
+    if (!audioBuffer || audioBuffer.length === 0) {
+      return false;
+    }
+
+    const audioId = this.storeTransientAudio(audioBuffer);
+    const audioUrl = `${this.getBackendPublicUrl()}/voice/audio/${audioId}.wav`;
+
+    this.logger.log(`Playing Sarvam Bulbul v3 audio (${audioBuffer.length} bytes) to call ${callControlId} via ${audioUrl}`);
+    return this.playbackAudio(callControlId, audioUrl);
+  }
+
+  private cleanExpiredTransientAudio(): void {
+    const now = Date.now();
+    for (const [id, entry] of this.transientAudioMap.entries()) {
+      if (now > entry.expiresAt) {
+        this.transientAudioMap.delete(id);
+      }
+    }
+  }
+
+  // ====================================================================
+  // 3. Webhook Ingestion & Orchestration
   // ====================================================================
 
   /**
@@ -257,6 +357,16 @@ export class CallsService {
 
         case 'call.answered':
           await this.handleCallAnswered(callPayload);
+          break;
+
+        case 'call.gather.ended':
+        case 'call.recording.saved':
+        case 'call.record.ended':
+          await this.handleCallerAudioReceived(callPayload);
+          break;
+
+        case 'call.playback.ended':
+          await this.handlePlaybackEnded(callPayload);
           break;
 
         case 'call.hangup':
@@ -422,7 +532,7 @@ export class CallsService {
 
   /**
    * Handles call answered event:
-   * Greets caller in configured language.
+   * Synthesizes and plays greeting using Sarvam Bulbul v3 TTS.
    */
   public async handleCallAnswered(callPayload: Record<string, unknown>): Promise<void> {
     const callControlId = String(callPayload.call_control_id ?? '');
@@ -444,11 +554,80 @@ export class CallsService {
 
     activeCall.transcript.push(transcriptItem);
 
-    // Speak initial greeting
-    await this.speakText(callControlId, {
-      payload: greeting,
-      language: isHindi ? 'hi-IN' : 'en-US',
+    // Primary: Synthesize greeting via Sarvam Bulbul v3 TTS
+    let greetingAudio: Buffer | undefined;
+    try {
+      const ttsResult = await this.sarvamService.textToSpeech(
+        greeting,
+        isHindi ? 'hi-IN' : 'en-IN',
+      );
+      greetingAudio = ttsResult.audioBuffer;
+    } catch (err: unknown) {
+      this.logger.warn(`Sarvam TTS greeting synthesis failed, fallback to speakText: ${err}`);
+    }
+
+    if (greetingAudio && greetingAudio.length > 0) {
+      const played = await this.playbackSarvamAudio(callControlId, greetingAudio);
+      if (!played) {
+        await this.speakText(callControlId, {
+          payload: greeting,
+          language: isHindi ? 'hi-IN' : 'en-US',
+        });
+      }
+    } else {
+      // Fallback only if Sarvam TTS synthesis failed
+      await this.speakText(callControlId, {
+        payload: greeting,
+        language: isHindi ? 'hi-IN' : 'en-US',
+      });
+    }
+  }
+
+  /**
+   * Handles incoming caller audio webhook events (call.recording.saved, call.gather.ended).
+   */
+  public async handleCallerAudioReceived(callPayload: Record<string, unknown>): Promise<void> {
+    const callControlId = String(callPayload.call_control_id ?? '');
+    if (!callControlId) return;
+
+    const recordingUrl = (callPayload.recording_url ?? callPayload.audio_url) as string | undefined;
+    const directSpeech = (callPayload.speech ?? callPayload.transcription) as string | undefined;
+
+    let audioBuffer: Buffer | undefined;
+
+    if (recordingUrl && typeof recordingUrl === 'string') {
+      try {
+        const apiKey = this.getTelnyxApiKey();
+        const headers: Record<string, string> = {};
+        if (apiKey) {
+          headers.Authorization = `Bearer ${apiKey}`;
+        }
+        const res = await fetch(recordingUrl, { headers });
+        if (res.ok) {
+          const arrayBuf = await res.arrayBuffer();
+          audioBuffer = Buffer.from(arrayBuf);
+        }
+      } catch (err: unknown) {
+        this.logger.warn(`Failed to fetch caller audio from recording_url ${recordingUrl}: ${err}`);
+      }
+    }
+
+    // Process utterance through Sarvam STT -> RAG -> Sarvam TTS -> Telnyx Playback
+    await this.processCallerUtterance(callControlId, {
+      audioBuffer,
+      transcript: directSpeech,
     });
+  }
+
+  /**
+   * Handles call.playback.ended:
+   * Keeps conversation turn flowing by initiating caller audio listening.
+   */
+  public async handlePlaybackEnded(callPayload: Record<string, unknown>): Promise<void> {
+    const callControlId = String(callPayload.call_control_id ?? '');
+    if (!callControlId || !this.activeCalls.has(callControlId)) return;
+
+    this.voiceSessionService.updateActivity(callControlId);
   }
 
   /**
@@ -500,7 +679,7 @@ export class CallsService {
   }
 
   // ====================================================================
-  // 3. Conversation Turn & Utterance Processing
+  // 4. Conversation Turn & Utterance Processing
   // ====================================================================
 
   /**
@@ -512,7 +691,7 @@ export class CallsService {
    * - Consecutive empty STT safety (3 = prompt, 5 = terminate)
    * - 10 conversation turns limit
    * - Document-only RAG response via ConversationService
-   * - Sarvam TTS audio synthesis and Telnyx audio delivery
+   * - Sarvam Bulbul v3 TTS audio synthesis and Telnyx playback_start delivery
    */
   public async processCallerUtterance(
     callControlId: string,
@@ -556,7 +735,7 @@ export class CallsService {
       };
     }
 
-    // 2. Transcribe Audio if buffer provided
+    // 2. Transcribe Audio via Sarvam Saaras v3 STT if buffer provided
     let transcriptText = input.transcript ?? '';
     if (!transcriptText && input.audioBuffer && input.audioBuffer.length > 0) {
       try {
@@ -709,14 +888,29 @@ export class CallsService {
       );
       audioBuffer = ttsResult.audioBuffer;
     } catch (err: unknown) {
-      this.logger.warn(`Sarvam TTS synthesis failed, fallback to Telnyx speak: ${err}`);
+      this.logger.warn(`Sarvam TTS synthesis failed: ${err}`);
     }
 
-    // Deliver speech to caller over Telnyx
-    await this.speakText(callControlId, {
-      payload: finalAnswer,
-      language: callerIsHindi ? 'hi-IN' : 'en-US',
-    });
+    // 9. Deliver Sarvam Bulbul v3 Generated Audio to Caller via Telnyx playback_start
+    if (audioBuffer && audioBuffer.length > 0) {
+      const playbackSuccess = await this.playbackSarvamAudio(callControlId, audioBuffer);
+      if (!playbackSuccess) {
+        this.logger.warn(
+          `playbackSarvamAudio dispatch failed for call ${callControlId}, falling back to speakText.`,
+        );
+        await this.speakText(callControlId, {
+          payload: finalAnswer,
+          language: callerIsHindi ? 'hi-IN' : 'en-US',
+        });
+      }
+    } else {
+      // Catastrophic fallback only if Sarvam TTS synthesis completely failed
+      this.logger.warn(`No Sarvam audio buffer generated for call ${callControlId}, falling back to speakText.`);
+      await this.speakText(callControlId, {
+        payload: finalAnswer,
+        language: callerIsHindi ? 'hi-IN' : 'en-US',
+      });
+    }
 
     return {
       responseAudio: audioBuffer,
@@ -728,7 +922,7 @@ export class CallsService {
   }
 
   // ====================================================================
-  // 4. Outbound Calling
+  // 5. Outbound Calling
   // ====================================================================
 
   /**
@@ -833,7 +1027,7 @@ export class CallsService {
   }
 
   // ====================================================================
-  // 5. Call History & Retrieval (Tenant-Isolated)
+  // 6. Call History & Retrieval (Tenant-Isolated)
   // ====================================================================
 
   /**
@@ -900,7 +1094,7 @@ export class CallsService {
   }
 
   // ====================================================================
-  // 6. Database Helpers & Atomic Billing
+  // 7. Database Helpers & Atomic Billing
   // ====================================================================
 
   /**
@@ -1073,5 +1267,6 @@ export class CallsService {
     this.activeCallTimers.clear();
     this.activeCalls.clear();
     this.processedEvents.clear();
+    this.transientAudioMap.clear();
   }
 }

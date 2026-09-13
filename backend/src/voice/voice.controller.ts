@@ -3,9 +3,13 @@ import {
   Post,
   Get,
   Body,
+  Param,
+  Res,
   HttpCode,
   HttpStatus,
   BadRequestException,
+  NotFoundException,
+  StreamableFile,
   Logger,
 } from '@nestjs/common';
 import { SarvamService } from '../sarvam/sarvam.service.js';
@@ -15,6 +19,7 @@ import { CallsService } from './calls.service.js';
 import type {
   WebhookAcknowledgment,
 } from './voice.types.js';
+import type { ProcessUtteranceResult } from './calls.types.js';
 
 @Controller('voice')
 export class VoiceController {
@@ -47,6 +52,55 @@ export class VoiceController {
   }
 
   /**
+   * Transient audio streaming endpoint for Telnyx playback_start.
+   * Delivers Sarvam Bulbul v3 synthesized WAV audio directly into the active call.
+   */
+  @Get('audio/:audioId')
+  public getAudioStream(
+    @Param('audioId') audioId: string,
+    @Res({ passthrough: true }) res: any,
+  ): StreamableFile {
+    const cleanId = audioId.replace(/\.wav$/i, '');
+    const buffer = this.callsService.getTransientAudio(cleanId);
+    if (!buffer) {
+      throw new NotFoundException('Audio buffer expired or not found');
+    }
+
+    res.set({
+      'Content-Type': 'audio/wav',
+      'Content-Length': buffer.length,
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+    });
+
+    return new StreamableFile(buffer);
+  }
+
+  /**
+   * Caller utterance ingestion endpoint for direct streaming bridges, relays, and testing.
+   * Feeds caller audio or transcript into the complete voice loop:
+   * Sarvam STT -> ConversationService RAG -> Sarvam TTS -> Telnyx Playback
+   */
+  @Post('calls/:callControlId/utterance')
+  @HttpCode(HttpStatus.OK)
+  public async handleUtterance(
+    @Param('callControlId') callControlId: string,
+    @Body() body: { transcript?: string; audioBase64?: string },
+  ): Promise<ProcessUtteranceResult> {
+    if (!callControlId || typeof callControlId !== 'string') {
+      throw new BadRequestException('Invalid callControlId');
+    }
+    const audioBuffer = body?.audioBase64
+      ? Buffer.from(body.audioBase64, 'base64')
+      : undefined;
+    return this.callsService.processCallerUtterance(callControlId, {
+      transcript: body?.transcript,
+      audioBuffer,
+    });
+  }
+
+  /**
    * Lightweight health and readiness endpoint.
    */
   @Get('health')
@@ -60,14 +114,6 @@ export class VoiceController {
 
   /**
    * Validates and acknowledges untrusted Telnyx webhook payloads.
-   *
-   * Security & Reliability Guarantees:
-   * 1. Rejects missing or malformed non-object bodies with HTTP 400.
-   * 2. Rejects missing or invalid event_type with HTTP 400.
-   * 3. Acknowledges valid event receipts with HTTP 200 so Telnyx does not repeatedly retry.
-   * 4. Catches downstream or internal processing errors and returns HTTP 200 acknowledgment without leaking stack traces.
-   * 5. Sanitizes diagnostic logs to prevent leaking phone numbers, tokens, or API credentials.
-   * 6. Strictly isolates tenants; does not allow untrusted webhook payloads to select another tenant or modify token_balance.
    */
   private async processWebhookPayload(body: unknown): Promise<WebhookAcknowledgment> {
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length === 0) {

@@ -7,6 +7,8 @@ export interface AppConfig {
   telnyxApiKey: string;
   adminPassword: string;
   frontendUrl?: string;
+  backendUrl?: string;
+  appUrl?: string;
   supabase: {
     url: string;
     serviceKey: string;
@@ -71,6 +73,10 @@ export const configuration = (): AppConfig => {
     telnyxApiKey,
     adminPassword,
     frontendUrl,
+    backendUrl: process.env.BACKEND_URL ?? process.env.APP_URL ?? `http://localhost:${port}`,
+    appUrl: process.env.APP_URL ?? process.env.BACKEND_URL ?? `http://localhost:${port}`,
+    BACKEND_URL: process.env.BACKEND_URL ?? process.env.APP_URL ?? `http://localhost:${port}`,
+    APP_URL: process.env.APP_URL ?? process.env.BACKEND_URL ?? `http://localhost:${port}`,
     // Flat uppercase mappings for direct ConfigService.get('SUPABASE_URL') lookups
     SUPABASE_URL: supabaseUrl,
     SUPABASE_SERVICE_KEY: supabaseServiceKey,

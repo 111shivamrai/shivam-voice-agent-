@@ -475,7 +475,8 @@ describe('CallsService', () => {
   // 5. Call Answered Event
   // ====================================================================
   describe('Call Answered Event', () => {
-    it('19. should speak English greeting and record in transcript', async () => {
+    it('19. should synthesize English greeting via Sarvam TTS, playback audio, and record in transcript', async () => {
+      const playbackSpy = jest.spyOn(service, 'playbackAudio');
       const speakSpy = jest.spyOn(service, 'speakText');
 
       await service.handleCallInitiated({
@@ -486,19 +487,24 @@ describe('CallsService', () => {
 
       await service.handleCallAnswered({ call_control_id: mockCallControlId });
 
-      expect(speakSpy).toHaveBeenCalledWith(
-        mockCallControlId,
-        expect.objectContaining({ payload: CALL_MESSAGES.GREETING_EN }),
+      expect(sarvamService.textToSpeech).toHaveBeenCalledWith(
+        CALL_MESSAGES.GREETING_EN,
+        'en-IN',
       );
+      expect(playbackSpy).toHaveBeenCalledWith(
+        mockCallControlId,
+        expect.stringMatching(/\/voice\/audio\/[0-9a-f-]+\.wav$/),
+      );
+      expect(speakSpy).not.toHaveBeenCalled();
 
       const active = service.getActiveCall(mockCallControlId);
       expect(active?.transcript.length).toBe(1);
       expect(active?.transcript[0].source).toBe('greeting');
     });
 
-    it('20. should speak Hindi greeting if client agent language is Hindi', async () => {
+    it('20. should speak Hindi greeting via Sarvam TTS if client agent language is Hindi', async () => {
       mockProfilesDb[mockClientId].agent_language = 'Hindi';
-      const speakSpy = jest.spyOn(service, 'speakText');
+      const playbackSpy = jest.spyOn(service, 'playbackAudio');
 
       await service.handleCallInitiated({
         call_control_id: mockCallControlId,
@@ -508,9 +514,13 @@ describe('CallsService', () => {
 
       await service.handleCallAnswered({ call_control_id: mockCallControlId });
 
-      expect(speakSpy).toHaveBeenCalledWith(
+      expect(sarvamService.textToSpeech).toHaveBeenCalledWith(
+        CALL_MESSAGES.GREETING_HI,
+        'hi-IN',
+      );
+      expect(playbackSpy).toHaveBeenCalledWith(
         mockCallControlId,
-        expect.objectContaining({ payload: CALL_MESSAGES.GREETING_HI }),
+        expect.stringMatching(/\/voice\/audio\/[0-9a-f-]+\.wav$/),
       );
     });
 
@@ -721,29 +731,79 @@ describe('CallsService', () => {
       expect(res2.responseText).not.toContain(CALL_MESSAGES.WARNING_3MIN_EN);
     });
 
-    it('36. should synthesize audio via Sarvam TTS and record in transcript', async () => {
+    it('36. should synthesize audio via Sarvam Bulbul v3 TTS and deliver to Telnyx via playback_start', async () => {
+      const playbackSpy = jest.spyOn(service, 'playbackAudio');
+      const speakSpy = jest.spyOn(service, 'speakText');
+
       const res = await service.processCallerUtterance(mockCallControlId, {
         transcript: 'When are you open?',
       });
 
-      expect(sarvamService.textToSpeech).toHaveBeenCalled();
+      // 1. Sarvam TTS must be called
+      expect(sarvamService.textToSpeech).toHaveBeenCalledWith(
+        expect.stringContaining('open Monday to Friday'),
+        'en-IN',
+      );
       expect(res.responseAudio).toBeDefined();
+
+      // 2. Playback of generated Sarvam audio URL must be triggered via Telnyx playback_start
+      expect(playbackSpy).toHaveBeenCalledWith(
+        mockCallControlId,
+        expect.stringMatching(/\/voice\/audio\/[0-9a-f-]+\.wav$/),
+      );
+
+      // 3. Telnyx speakText must NOT be called on the normal successful path
+      expect(speakSpy).not.toHaveBeenCalled();
+
+      // 4. Verify transient audio can be retrieved by ID
+      const audioUrl = playbackSpy.mock.calls[0][1];
+      const audioIdMatch = audioUrl.match(/\/voice\/audio\/([0-9a-f-]+)\.wav$/);
+      expect(audioIdMatch).toBeTruthy();
+      const storedBuffer = service.getTransientAudio(audioIdMatch![1]);
+      expect(storedBuffer).toEqual(Buffer.from('mock-audio-data'));
 
       const active = service.getActiveCall(mockCallControlId)!;
       expect(active.transcript.some((t) => t.role === 'user')).toBe(true);
       expect(active.transcript.some((t) => t.role === 'assistant')).toBe(true);
     });
 
-    it('37. should fallback to Telnyx speakText if Sarvam TTS synthesis fails', async () => {
+    it('37. should fallback to Telnyx speakText ONLY if Sarvam TTS synthesis fails', async () => {
       (sarvamService.textToSpeech as jest.Mock).mockRejectedValueOnce(new Error('TTS down'));
       const speakSpy = jest.spyOn(service, 'speakText');
+      const playbackSpy = jest.spyOn(service, 'playbackAudio');
 
       const res = await service.processCallerUtterance(mockCallControlId, {
         transcript: 'Test fallback TTS',
       });
 
-      expect(speakSpy).toHaveBeenCalled();
+      expect(playbackSpy).not.toHaveBeenCalled();
+      expect(speakSpy).toHaveBeenCalledWith(
+        mockCallControlId,
+        expect.objectContaining({ payload: expect.any(String) }),
+      );
       expect(res.responseText).toBeDefined();
+    });
+
+    it('37b. should process incoming caller audio from Telnyx webhook (call.gather.ended)', async () => {
+      const processSpy = jest.spyOn(service, 'processCallerUtterance');
+
+      await service.handleTelnyxWebhook({
+        data: {
+          id: 'evt-audio-gather',
+          event_type: 'call.gather.ended',
+          payload: {
+            call_control_id: mockCallControlId,
+            speech: 'How do I reach customer support?',
+          },
+        },
+      });
+
+      expect(processSpy).toHaveBeenCalledWith(
+        mockCallControlId,
+        expect.objectContaining({
+          transcript: 'How do I reach customer support?',
+        }),
+      );
     });
   });
 
