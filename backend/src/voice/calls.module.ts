@@ -1,23 +1,20 @@
 import { Module } from '@nestjs/common';
-import { VoiceController } from './voice.controller.js';
+import { SupabaseModule } from '../supabase/supabase.module.js';
 import { SarvamModule } from '../sarvam/sarvam.module.js';
 import { VoiceSessionModule } from './voice-session.module.js';
 import { ConversationModule } from './conversation.module.js';
-import { CallsModule } from './calls.module.js';
+import { CallsService } from './calls.service.js';
+import { CallsController } from './calls.controller.js';
 
 @Module({
   imports: [
+    SupabaseModule,
     SarvamModule,
     VoiceSessionModule,
     ConversationModule,
-    CallsModule,
   ],
-  controllers: [VoiceController],
-  exports: [
-    SarvamModule,
-    VoiceSessionModule,
-    ConversationModule,
-    CallsModule,
-  ],
+  controllers: [CallsController],
+  providers: [CallsService],
+  exports: [CallsService],
 })
-export class VoiceModule {}
+export class CallsModule {}

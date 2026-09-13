@@ -4,6 +4,7 @@ import { VoiceController } from './voice.controller.js';
 import { SarvamService } from '../sarvam/sarvam.service.js';
 import { VoiceSessionService } from './voice-session.service.js';
 import { ConversationService } from './conversation.service.js';
+import { CallsService } from './calls.service.js';
 
 describe('VoiceController', () => {
   let controller: VoiceController;
@@ -35,12 +36,26 @@ describe('VoiceController', () => {
       embedText: jest.fn(),
     };
 
+    const mockCallsService = {
+      handleTelnyxWebhook: jest.fn().mockImplementation(async (payload: any) => {
+        const eventData = payload?.data ?? payload;
+        return {
+          received: true,
+          status: 'acknowledged',
+          event: eventData?.event_type ?? payload?.event_type,
+          call_control_id: eventData?.payload?.call_control_id ?? payload?.call_control_id,
+          message: 'Webhook received and acknowledged',
+        };
+      }),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       controllers: [VoiceController],
       providers: [
         { provide: SarvamService, useValue: mockSarvamService },
         { provide: VoiceSessionService, useValue: mockVoiceSessionService },
         { provide: ConversationService, useValue: mockConversationService },
+        { provide: CallsService, useValue: mockCallsService },
       ],
     }).compile();
 
@@ -83,7 +98,7 @@ describe('VoiceController', () => {
   });
 
   describe('Webhook Ingestion & Validation', () => {
-    it('2. valid webhook payload is accepted', () => {
+    it('2. valid webhook payload is accepted', async () => {
       const validPayload = {
         data: {
           event_type: 'call.initiated',
@@ -99,7 +114,7 @@ describe('VoiceController', () => {
         },
       };
 
-      const result = controller.handleWebhook(validPayload);
+      const result = await controller.handleWebhook(validPayload);
       expect(result).toBeDefined();
       expect(result.received).toBe(true);
       expect(result.status).toBe('acknowledged');
@@ -107,31 +122,31 @@ describe('VoiceController', () => {
       expect(result.call_control_id).toBe('v3:test-control-id-abc');
 
       // Also verify root webhook alias
-      const rootResult = controller.handleRootWebhook(validPayload);
+      const rootResult = await controller.handleRootWebhook(validPayload);
       expect(rootResult.received).toBe(true);
       expect(rootResult.status).toBe('acknowledged');
     });
 
-    it('3. malformed payload is handled safely', () => {
+    it('3. malformed payload is handled safely', async () => {
       // Non-object or missing event_type
-      expect(() => controller.handleWebhook('string-payload')).toThrow(
+      await expect(controller.handleWebhook('string-payload')).rejects.toThrow(
         BadRequestException,
       );
-      expect(() => controller.handleWebhook([1, 2, 3])).toThrow(
+      await expect(controller.handleWebhook([1, 2, 3])).rejects.toThrow(
         BadRequestException,
       );
-      expect(() => controller.handleWebhook({ random_key: 'no_event' })).toThrow(
+      await expect(controller.handleWebhook({ random_key: 'no_event' })).rejects.toThrow(
         BadRequestException,
       );
     });
 
-    it('4. missing payload is handled safely', () => {
-      expect(() => controller.handleWebhook(null)).toThrow(BadRequestException);
-      expect(() => controller.handleWebhook(undefined)).toThrow(BadRequestException);
-      expect(() => controller.handleWebhook({})).toThrow(BadRequestException);
+    it('4. missing payload is handled safely', async () => {
+      await expect(controller.handleWebhook(null)).rejects.toThrow(BadRequestException);
+      await expect(controller.handleWebhook(undefined)).rejects.toThrow(BadRequestException);
+      await expect(controller.handleWebhook({})).rejects.toThrow(BadRequestException);
     });
 
-    it('5. unsupported event structure is handled safely', () => {
+    it('5. unsupported event structure is handled safely', async () => {
       const payloadWithUnknownEvent = {
         data: {
           event_type: 'custom.unsupported.event',
@@ -141,31 +156,31 @@ describe('VoiceController', () => {
         },
       };
 
-      const result = controller.handleWebhook(payloadWithUnknownEvent);
+      const result = await controller.handleWebhook(payloadWithUnknownEvent);
       expect(result.received).toBe(true);
       expect(result.status).toBe('acknowledged');
       expect(result.event).toBe('custom.unsupported.event');
     });
 
-    it('16. malicious/untrusted webhook fields are handled safely', () => {
+    it('16. malicious/untrusted webhook fields are handled safely', async () => {
       // Payload with prototype pollution attempt
       const maliciousPayload = JSON.parse(
         '{"__proto__": {"admin": true}, "data": {"event_type": "call.initiated"}}',
       );
 
-      expect(() => controller.handleWebhook(maliciousPayload)).toThrow(
+      await expect(controller.handleWebhook(maliciousPayload)).rejects.toThrow(
         BadRequestException,
       );
     });
   });
 
   describe('Error Handling & Acknowledgment', () => {
-    it('6. internal service failure does not expose stack traces', () => {
+    it('6. internal service failure does not expose stack traces', async () => {
       // Spy on processWebhookPayload to simulate an unexpected internal processing throw
       jest
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         .spyOn(controller as any, 'processWebhookPayload')
-        .mockImplementationOnce(() => {
+        .mockImplementationOnce(async () => {
           try {
             throw new Error('Database deadlocked at internal/pg.ts:44:12\n    at internalQuery()');
           } catch {
@@ -178,7 +193,7 @@ describe('VoiceController', () => {
           }
         });
 
-      const response = controller.handleWebhook({
+      const response = await controller.handleWebhook({
         data: { event_type: 'call.initiated' },
       });
 
@@ -188,7 +203,7 @@ describe('VoiceController', () => {
       expect(response.message).not.toContain('internal/pg.ts');
     });
 
-    it('7. webhook acknowledgement returns HTTP 200 where required', () => {
+    it('7. webhook acknowledgement returns HTTP 200 where required', async () => {
       const payload = {
         data: {
           event_type: 'call.hangup',
@@ -196,7 +211,7 @@ describe('VoiceController', () => {
         },
       };
 
-      const res = controller.handleWebhook(payload);
+      const res = await controller.handleWebhook(payload);
       expect(res.received).toBe(true);
       expect(res.status).toBe('acknowledged');
     });
@@ -213,8 +228,8 @@ describe('VoiceController', () => {
       expect(sanitized).toContain('[REDACTED]');
     });
 
-    it('9. API keys are never returned', () => {
-      const response = controller.handleWebhook({
+    it('9. API keys are never returned', async () => {
+      const response = await controller.handleWebhook({
         data: {
           event_type: 'call.answered',
           payload: { call_control_id: 'ctrl-123' },
@@ -241,7 +256,7 @@ describe('VoiceController', () => {
       expect(methodNames).not.toContain('approvePayment');
     });
 
-    it('11. controller does not bypass client_id isolation', () => {
+    it('11. controller does not bypass client_id isolation', async () => {
       // A caller sending a spoofed client_id in a raw webhook payload cannot hijack or select another tenant
       const spoofedPayload = {
         data: {
@@ -253,7 +268,7 @@ describe('VoiceController', () => {
         },
       };
 
-      const result = controller.handleWebhook(spoofedPayload);
+      const result = await controller.handleWebhook(spoofedPayload);
       // The controller acknowledges receipt without granting tenant selection
       expect(result.received).toBe(true);
       expect(result.status).toBe('acknowledged');

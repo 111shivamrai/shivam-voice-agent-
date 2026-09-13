@@ -11,6 +11,7 @@ import {
 import { SarvamService } from '../sarvam/sarvam.service.js';
 import { VoiceSessionService } from './voice-session.service.js';
 import { ConversationService } from './conversation.service.js';
+import { CallsService } from './calls.service.js';
 import type {
   WebhookAcknowledgment,
 } from './voice.types.js';
@@ -23,6 +24,7 @@ export class VoiceController {
     public readonly sarvamService: SarvamService,
     public readonly voiceSessionService: VoiceSessionService,
     public readonly conversationService: ConversationService,
+    public readonly callsService: CallsService,
   ) {}
 
   /**
@@ -31,7 +33,7 @@ export class VoiceController {
    */
   @Post('webhook')
   @HttpCode(HttpStatus.OK)
-  public handleWebhook(@Body() body: unknown): WebhookAcknowledgment {
+  public async handleWebhook(@Body() body: unknown): Promise<WebhookAcknowledgment> {
     return this.processWebhookPayload(body);
   }
 
@@ -40,7 +42,7 @@ export class VoiceController {
    */
   @Post()
   @HttpCode(HttpStatus.OK)
-  public handleRootWebhook(@Body() body: unknown): WebhookAcknowledgment {
+  public async handleRootWebhook(@Body() body: unknown): Promise<WebhookAcknowledgment> {
     return this.processWebhookPayload(body);
   }
 
@@ -67,7 +69,7 @@ export class VoiceController {
    * 5. Sanitizes diagnostic logs to prevent leaking phone numbers, tokens, or API credentials.
    * 6. Strictly isolates tenants; does not allow untrusted webhook payloads to select another tenant or modify token_balance.
    */
-  private processWebhookPayload(body: unknown): WebhookAcknowledgment {
+  private async processWebhookPayload(body: unknown): Promise<WebhookAcknowledgment> {
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length === 0) {
       throw new BadRequestException('Invalid or missing webhook payload');
     }
@@ -110,7 +112,11 @@ export class VoiceController {
     );
 
     try {
-      // Delegate or route webhook event if internal handling is defined
+      // Delegate to CallsService for full orchestration (state, audio, RAG, billing)
+      if (this.callsService) {
+        return await this.callsService.handleTelnyxWebhook(body);
+      }
+
       return {
         received: true,
         status: 'acknowledged',

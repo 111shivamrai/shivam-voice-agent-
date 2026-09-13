@@ -10,6 +10,7 @@ import { SarvamModule } from './sarvam/sarvam.module.js';
 import { VoiceSessionModule } from './voice/voice-session.module.js';
 import { ConversationModule } from './voice/conversation.module.js';
 import { VoiceModule } from './voice/voice.module.js';
+import { CallsModule } from './voice/calls.module.js';
 
 @Module({
   imports: [
@@ -23,6 +24,7 @@ import { VoiceModule } from './voice/voice.module.js';
     SarvamModule,
     VoiceSessionModule,
     ConversationModule,
+    CallsModule,
     VoiceModule,
   ],
   controllers: [AppController],

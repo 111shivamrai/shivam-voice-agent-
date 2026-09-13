@@ -19,6 +19,9 @@ export interface AppConfig {
   };
   telnyx: {
     apiKey: string;
+    phoneNumber?: string;
+    appId?: string;
+    connectionId?: string;
   };
   admin: {
     password: string;
@@ -89,7 +92,13 @@ export const configuration = (): AppConfig => {
     },
     telnyx: {
       apiKey: telnyxApiKey,
+      phoneNumber: process.env.TELNYX_PHONE_NUMBER,
+      appId: process.env.TELNYX_APP_ID,
+      connectionId: process.env.TELNYX_CONNECTION_ID,
     },
+    TELNYX_PHONE_NUMBER: process.env.TELNYX_PHONE_NUMBER,
+    TELNYX_APP_ID: process.env.TELNYX_APP_ID,
+    TELNYX_CONNECTION_ID: process.env.TELNYX_CONNECTION_ID,
     admin: {
       password: adminPassword,
     },
