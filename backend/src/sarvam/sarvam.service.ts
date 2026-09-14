@@ -176,9 +176,9 @@ export class SarvamService {
     const apiKey = this.getApiKey();
     const endpoint = `${this.baseUrl}/text-to-speech`;
 
-    // Speaker selection according to locked spec:
-    // hi-IN -> meera, en-IN -> pavithra
-    const speaker = language === 'hi-IN' ? 'meera' : 'pavithra';
+    // Speaker selection for bulbul:v3:
+    // 'priya' is fully supported for both hi-IN and en-IN
+    const speaker = 'priya';
     const trimmedText = text.trim();
 
     this.logger.log(

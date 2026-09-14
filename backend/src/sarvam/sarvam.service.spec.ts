@@ -199,7 +199,7 @@ describe('SarvamService', () => {
   describe('textToSpeech', () => {
     const mockWavBase64 = 'UklGRiQAAABXQVZFZm10IBAAAAABAAEA';
 
-    it('successfully synthesizes Hindi TTS with bulbul:v3, hi-IN, meera, and 8000 Hz', async () => {
+    it('successfully synthesizes Hindi TTS with bulbul:v3, hi-IN, priya, and 8000 Hz', async () => {
       (global.fetch as jest.Mock).mockResolvedValue({
         ok: true,
         status: 200,
@@ -214,7 +214,7 @@ describe('SarvamService', () => {
       expect(Buffer.isBuffer(res.audioBuffer)).toBe(true);
       expect(res.sampleRate).toBe(8000);
       expect(res.languageCode).toBe('hi-IN');
-      expect(res.speaker).toBe('meera');
+      expect(res.speaker).toBe('priya');
 
       const [url, options] = (global.fetch as jest.Mock).mock.calls[0];
       expect(url).toBe('https://api.sarvam.ai/text-to-speech');
@@ -225,7 +225,7 @@ describe('SarvamService', () => {
       expect(body).toEqual({
         inputs: ['नमस्ते, क्या हाल है?'],
         target_language_code: 'hi-IN',
-        speaker: 'meera',
+        speaker: 'priya',
         pace: 1.0,
         speech_sample_rate: 8000,
         enable_preprocessing: true,
@@ -233,7 +233,7 @@ describe('SarvamService', () => {
       });
     });
 
-    it('successfully synthesizes English TTS with bulbul:v3, en-IN, and pavithra speaker', async () => {
+    it('successfully synthesizes English TTS with bulbul:v3, en-IN, and priya speaker', async () => {
       (global.fetch as jest.Mock).mockResolvedValue({
         ok: true,
         status: 200,
@@ -247,13 +247,13 @@ describe('SarvamService', () => {
         'en-IN',
       );
 
-      expect(res.speaker).toBe('pavithra');
+      expect(res.speaker).toBe('priya');
       expect(res.languageCode).toBe('en-IN');
       expect(res.sampleRate).toBe(8000);
 
       const [, options] = (global.fetch as jest.Mock).mock.calls[0];
       const body = JSON.parse(options.body as string);
-      expect(body.speaker).toBe('pavithra');
+      expect(body.speaker).toBe('priya');
       expect(body.target_language_code).toBe('en-IN');
       expect(body.model).toBe('bulbul:v3');
     });

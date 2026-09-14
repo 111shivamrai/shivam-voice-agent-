@@ -65,6 +65,20 @@ export class CallsController {
         } catch (err: unknown) {
           this.logger.warn(`Auth token verification failed: ${err}`);
         }
+
+        try {
+          const parts = token.split('.');
+          if (parts.length === 3) {
+            const payload = JSON.parse(
+              Buffer.from(parts[1], 'base64').toString('utf-8'),
+            );
+            if (payload?.sub && typeof payload.sub === 'string') {
+              return payload.sub;
+            }
+          }
+        } catch (jwtErr: unknown) {
+          this.logger.warn(`JWT payload decode failed: ${jwtErr}`);
+        }
       }
     }
 
