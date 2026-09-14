@@ -394,10 +394,13 @@ export class CallsService {
       return this.twilioService.generateTwiML('Invalid call request.');
     }
 
-    // Look up client by assigned phone number in profiles table
-    const profile = await this.findClientByPhoneNumber(to);
+    // Look up client by assigned phone number in profiles table (try To first, then From for outbound calls)
+    let profile = await this.findClientByPhoneNumber(to);
     if (!profile) {
-      this.logger.warn(`No client profile found for called number "${to}". Rejecting call.`);
+      profile = await this.findClientByPhoneNumber(from);
+    }
+    if (!profile) {
+      this.logger.warn(`No client profile found for called number "${to}" or caller "${from}". Rejecting call.`);
       return this.twilioService.generateTwiML('This number is not configured.');
     }
 
@@ -605,10 +608,13 @@ export class CallsService {
       return;
     }
 
-    // Look up client by assigned phone number
-    const profile = await this.findClientByPhoneNumber(to);
+    // Look up client by assigned phone number (try To first, then From for outbound calls)
+    let profile = await this.findClientByPhoneNumber(to);
     if (!profile) {
-      this.logger.warn(`No client profile found for called number "${to}". Rejecting call.`);
+      profile = await this.findClientByPhoneNumber(from);
+    }
+    if (!profile) {
+      this.logger.warn(`No client profile found for called number "${to}" or caller "${from}". Rejecting call.`);
       await this.hangupCall(callControlId);
       return;
     }
