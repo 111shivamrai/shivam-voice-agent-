@@ -896,7 +896,12 @@ export class CallsService {
       const isHindi = activeCall.language.includes('hindi');
       const limitMsg = isHindi ? CALL_MESSAGES.TIME_LIMIT_HI : CALL_MESSAGES.TIME_LIMIT_EN;
 
-      await this.playbackSarvamAudio(callControlId, Buffer.from(limitMsg));
+      try {
+        const tts = await this.sarvamService.textToSpeech(limitMsg, isHindi ? 'hi-IN' : 'en-IN');
+        await this.playbackSarvamAudio(callControlId, tts.audioBuffer);
+      } catch {
+        await this.speakText(callControlId, { payload: limitMsg, language: isHindi ? 'hi-IN' : 'en-US' });
+      }
       await this.hangupCall(callControlId);
       await this.handleCallHangup({ call_control_id: callControlId });
 
@@ -931,7 +936,12 @@ export class CallsService {
         this.logger.warn(`Call ${callControlId} reached 5 consecutive empty STT triggers. Terminating call.`);
         const goodbyeMsg = isHindi ? CALL_MESSAGES.GOODBYE_HI : CALL_MESSAGES.GOODBYE_EN;
 
-        await this.playbackSarvamAudio(callControlId, Buffer.from(goodbyeMsg));
+        try {
+          const tts = await this.sarvamService.textToSpeech(goodbyeMsg, isHindi ? 'hi-IN' : 'en-IN');
+          await this.playbackSarvamAudio(callControlId, tts.audioBuffer);
+        } catch {
+          await this.speakText(callControlId, { payload: goodbyeMsg, language: isHindi ? 'hi-IN' : 'en-US' });
+        }
         await this.hangupCall(callControlId);
         await this.handleCallHangup({ call_control_id: callControlId });
 
@@ -945,7 +955,12 @@ export class CallsService {
       if (emptyCount >= EMPTY_STT_PROMPT_THRESHOLD) {
         // Prompt caller after 3 consecutive empty frames
         const promptMsg = isHindi ? CALL_MESSAGES.STILL_THERE_HI : CALL_MESSAGES.STILL_THERE_EN;
-        await this.playbackSarvamAudio(callControlId, Buffer.from(promptMsg));
+        try {
+          const tts = await this.sarvamService.textToSpeech(promptMsg, isHindi ? 'hi-IN' : 'en-IN');
+          await this.playbackSarvamAudio(callControlId, tts.audioBuffer);
+        } catch {
+          await this.speakText(callControlId, { payload: promptMsg, language: isHindi ? 'hi-IN' : 'en-US' });
+        }
 
         return {
           responseText: promptMsg,
@@ -996,7 +1011,12 @@ export class CallsService {
         source: 'system',
       });
 
-      await this.playbackSarvamAudio(callControlId, Buffer.from(maxTurnMsg));
+      try {
+        const tts = await this.sarvamService.textToSpeech(maxTurnMsg, callerIsHindi ? 'hi-IN' : 'en-IN');
+        await this.playbackSarvamAudio(callControlId, tts.audioBuffer);
+      } catch {
+        await this.speakText(callControlId, { payload: maxTurnMsg, language: callerIsHindi ? 'hi-IN' : 'en-US' });
+      }
       await this.hangupCall(callControlId);
       await this.handleCallHangup({ call_control_id: callControlId });
 
@@ -1360,7 +1380,7 @@ export class CallsService {
     ) {
       this.logger.log(`Matched incoming call to configured Twilio number ${configuredTwilioNumber}. Using active client profile.`);
       return {
-        id: '111shivamrai@gmail.com',
+        id: 'a0000000-0000-4000-8000-000000000001',
         token_balance: 100,
         agent_language: 'english',
         telnyx_number: cleanNum,

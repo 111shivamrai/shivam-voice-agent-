@@ -184,6 +184,21 @@ export class MediaStreamService {
       `Twilio media stream session established for call ${callControlId} (client: ${activeCall.clientId}, stream: ${streamId})`,
     );
 
+    // Trigger greeting to speak immediately upon stream start
+    if (this.callsService && typeof this.callsService.handleCallAnswered === 'function') {
+      setTimeout(() => {
+        try {
+          this.callsService
+            .handleCallAnswered({ call_control_id: callControlId, CallSid: callControlId })
+            ?.catch?.((err: unknown) => {
+              this.logger.error(`Error playing greeting on media stream start: ${err}`);
+            });
+        } catch (err: unknown) {
+          this.logger.error(`Error executing handleCallAnswered on stream start: ${err}`);
+        }
+      }, 200);
+    }
+
     return true;
   }
 
