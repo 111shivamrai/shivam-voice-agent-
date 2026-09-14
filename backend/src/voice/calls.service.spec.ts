@@ -5,6 +5,8 @@ import { SupabaseService } from '../supabase/supabase.service.js';
 import { SarvamService } from '../sarvam/sarvam.service.js';
 import { VoiceSessionService } from './voice-session.service.js';
 import { ConversationService } from './conversation.service.js';
+import { TwilioService } from '../twilio/twilio.service.js';
+import { MediaStreamService } from './media-stream.service.js';
 import {
   InsufficientBalanceException,
   CallNotFoundException,
@@ -24,6 +26,7 @@ describe('CallsService', () => {
   let sarvamService: SarvamService;
   let voiceSessionService: VoiceSessionService;
   let _conversationService: ConversationService;
+  let twilioService: TwilioService;
 
   const mockClientId = '11111111-1111-4111-8111-111111111111';
   const mockOtherClientId = '22222222-2222-4222-8222-222222222222';
@@ -36,26 +39,23 @@ describe('CallsService', () => {
   let mockCallsDb: any[] = [];
 
   const createMockSupabase = () => {
-    return {
-      getClient: jest.fn().mockReturnValue({
-        auth: {
-          getUser: jest.fn().mockImplementation(async (token: string) => {
-            if (token === 'valid-token') {
-              return { data: { user: { id: mockClientId } }, error: null };
-            }
-            return { data: null, error: new Error('Invalid token') };
-          }),
-        },
-      }),
-      getAdminClient: jest.fn().mockReturnValue({
-        from: jest.fn().mockImplementation((table: string) => {
-          if (table === 'profiles') {
-            return {
-              select: jest.fn().mockReturnValue({
-                eq: jest.fn().mockImplementation((field: string, val: string) => {
-                  let found: any = null;
-                  if (field === 'id') {
-                    found = mockProfilesDb[val];
+    const dbClient = {
+      auth: {
+        getUser: jest.fn().mockImplementation(async (token: string) => {
+          if (token === 'valid-token') {
+            return { data: { user: { id: mockClientId } }, error: null };
+          }
+          return { data: null, error: new Error('Invalid token') };
+        }),
+      },
+      from: jest.fn().mockImplementation((table: string) => {
+        if (table === 'profiles') {
+          return {
+            select: jest.fn().mockReturnValue({
+              eq: jest.fn().mockImplementation((field: string, val: string) => {
+                let found: any = null;
+                if (field === 'id') {
+                  found = mockProfilesDb[val];
                   } else if (field === 'telnyx_number') {
                     found = Object.values(mockProfilesDb).find(
                       (p: any) => p.telnyx_number === val || p.telnyx_number === `+${val}`,
@@ -157,9 +157,12 @@ describe('CallsService', () => {
           }
           return Promise.resolve({ data: null, error: null });
         }),
-      }),
+      };
+      return {
+        getClient: jest.fn().mockReturnValue(dbClient),
+        getAdminClient: jest.fn().mockReturnValue(dbClient),
+      };
     };
-  };
 
   beforeEach(async () => {
     mockProfilesDb = {
@@ -205,12 +208,34 @@ describe('CallsService', () => {
         CallsService,
         VoiceSessionService,
         {
+          provide: TwilioService,
+          useValue: {
+            answerCall: jest.fn().mockReturnValue('<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="wss://test.host/voice/stream"/></Connect></Response>'),
+            hangupCall: jest.fn().mockResolvedValue(undefined),
+            makeOutboundCall: jest.fn().mockResolvedValue('CA_outbound_test_123'),
+            generateTwiML: jest.fn().mockImplementation((msg: string) => `<?xml version="1.0" encoding="UTF-8"?><Response><Say>${msg}</Say><Hangup/></Response>`),
+            getDefaultPhoneNumber: jest.fn().mockReturnValue(mockTelnyxNumber),
+            getStreamUrl: jest.fn().mockReturnValue('wss://test.host/voice/stream'),
+          },
+        },
+        {
+          provide: MediaStreamService,
+          useValue: {
+            sendAudioToCaller: jest.fn().mockResolvedValue(false),
+            handleWebSocketMessage: jest.fn().mockResolvedValue(undefined),
+          },
+        },
+        {
           provide: ConfigService,
           useValue: {
             get: jest.fn().mockImplementation((key: string) => {
               if (key === 'TELNYX_API_KEY' || key === 'telnyx.apiKey') return 'KEY_TELNYX_TEST_123';
               if (key === 'TELNYX_PHONE_NUMBER' || key === 'telnyx.phoneNumber') return mockTelnyxNumber;
               if (key === 'TELNYX_CONNECTION_ID' || key === 'TELNYX_APP_ID') return 'conn-123';
+              if (key === 'TWILIO_ACCOUNT_SID') return 'AC_test_123';
+              if (key === 'TWILIO_AUTH_TOKEN') return 'token_test_123';
+              if (key === 'TWILIO_PHONE_NUMBER') return mockTelnyxNumber;
+              if (key === 'BACKEND_URL') return 'http://localhost:3001';
               return null;
             }),
           },
@@ -250,6 +275,7 @@ describe('CallsService', () => {
     sarvamService = module.get<SarvamService>(SarvamService);
     voiceSessionService = module.get<VoiceSessionService>(VoiceSessionService);
     _conversationService = module.get<ConversationService>(ConversationService);
+    twilioService = module.get<TwilioService>(TwilioService);
 
     service.clearActiveCalls();
   });
@@ -836,7 +862,10 @@ describe('CallsService', () => {
       expect(mockCallsDb.some((c) => c.direction === 'outbound')).toBe(true);
     });
 
-    it('41. should handle Telnyx API failure and throw TelnyxApiException', async () => {
+    it('41. should handle Telephony API failure and throw TelnyxApiException', async () => {
+      (twilioService.makeOutboundCall as jest.Mock).mockRejectedValueOnce(
+        new Error('Twilio outbound call failure'),
+      );
       (global.fetch as jest.Mock).mockResolvedValueOnce(
         new Response('Invalid destination', { status: 400 }),
       );

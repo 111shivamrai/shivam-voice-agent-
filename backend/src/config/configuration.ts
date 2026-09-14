@@ -4,11 +4,14 @@ export interface AppConfig {
   supabaseServiceKey: string;
   openaiApiKey: string;
   sarvamApiKey: string;
-  telnyxApiKey: string;
   adminPassword: string;
-  frontendUrl?: string;
-  backendUrl?: string;
+  twilioAccountSid: string;
+  twilioAuthToken: string;
+  twilioPhoneNumber: string;
+  backendUrl: string;
   appUrl?: string;
+  frontendUrl?: string;
+  telnyxApiKey?: string;
   supabase: {
     url: string;
     serviceKey: string;
@@ -19,8 +22,13 @@ export interface AppConfig {
   sarvam: {
     apiKey: string;
   };
+  twilio: {
+    accountSid: string;
+    authToken: string;
+    phoneNumber: string;
+  };
   telnyx: {
-    apiKey: string;
+    apiKey?: string;
     phoneNumber?: string;
     appId?: string;
     connectionId?: string;
@@ -37,7 +45,10 @@ export const configuration = (): AppConfig => {
     'SUPABASE_SERVICE_KEY',
     'OPENAI_API_KEY',
     'SARVAM_API_KEY',
-    'TELNYX_API_KEY',
+    'TWILIO_ACCOUNT_SID',
+    'TWILIO_AUTH_TOKEN',
+    'TWILIO_PHONE_NUMBER',
+    'BACKEND_URL',
     'ADMIN_PASSWORD',
   ] as const;
 
@@ -60,9 +71,13 @@ export const configuration = (): AppConfig => {
   const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY!;
   const openaiApiKey = process.env.OPENAI_API_KEY!;
   const sarvamApiKey = process.env.SARVAM_API_KEY!;
-  const telnyxApiKey = process.env.TELNYX_API_KEY!;
+  const twilioAccountSid = process.env.TWILIO_ACCOUNT_SID!;
+  const twilioAuthToken = process.env.TWILIO_AUTH_TOKEN!;
+  const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER!;
+  const backendUrl = process.env.BACKEND_URL!;
   const adminPassword = process.env.ADMIN_PASSWORD!;
   const frontendUrl = process.env.FRONTEND_URL;
+  const telnyxApiKey = process.env.TELNYX_API_KEY;
 
   return {
     port,
@@ -70,21 +85,29 @@ export const configuration = (): AppConfig => {
     supabaseServiceKey,
     openaiApiKey,
     sarvamApiKey,
-    telnyxApiKey,
+    twilioAccountSid,
+    twilioAuthToken,
+    twilioPhoneNumber,
+    backendUrl,
     adminPassword,
     frontendUrl,
-    backendUrl: process.env.BACKEND_URL ?? process.env.APP_URL ?? `http://localhost:${port}`,
-    appUrl: process.env.APP_URL ?? process.env.BACKEND_URL ?? `http://localhost:${port}`,
-    BACKEND_URL: process.env.BACKEND_URL ?? process.env.APP_URL ?? `http://localhost:${port}`,
-    APP_URL: process.env.APP_URL ?? process.env.BACKEND_URL ?? `http://localhost:${port}`,
-    // Flat uppercase mappings for direct ConfigService.get('SUPABASE_URL') lookups
+    telnyxApiKey,
+    appUrl: process.env.APP_URL ?? backendUrl,
+    // Flat uppercase mappings for direct ConfigService.get('...') lookups
     SUPABASE_URL: supabaseUrl,
     SUPABASE_SERVICE_KEY: supabaseServiceKey,
     OPENAI_API_KEY: openaiApiKey,
     SARVAM_API_KEY: sarvamApiKey,
-    TELNYX_API_KEY: telnyxApiKey,
+    TWILIO_ACCOUNT_SID: twilioAccountSid,
+    TWILIO_AUTH_TOKEN: twilioAuthToken,
+    TWILIO_PHONE_NUMBER: twilioPhoneNumber,
+    BACKEND_URL: backendUrl,
     ADMIN_PASSWORD: adminPassword,
     PORT: port,
+    TELNYX_API_KEY: telnyxApiKey,
+    TELNYX_PHONE_NUMBER: process.env.TELNYX_PHONE_NUMBER,
+    TELNYX_APP_ID: process.env.TELNYX_APP_ID,
+    TELNYX_CONNECTION_ID: process.env.TELNYX_CONNECTION_ID,
     // Nested domain namespaces
     supabase: {
       url: supabaseUrl,
@@ -96,15 +119,17 @@ export const configuration = (): AppConfig => {
     sarvam: {
       apiKey: sarvamApiKey,
     },
+    twilio: {
+      accountSid: twilioAccountSid,
+      authToken: twilioAuthToken,
+      phoneNumber: twilioPhoneNumber,
+    },
     telnyx: {
       apiKey: telnyxApiKey,
       phoneNumber: process.env.TELNYX_PHONE_NUMBER,
       appId: process.env.TELNYX_APP_ID,
       connectionId: process.env.TELNYX_CONNECTION_ID,
     },
-    TELNYX_PHONE_NUMBER: process.env.TELNYX_PHONE_NUMBER,
-    TELNYX_APP_ID: process.env.TELNYX_APP_ID,
-    TELNYX_CONNECTION_ID: process.env.TELNYX_CONNECTION_ID,
     admin: {
       password: adminPassword,
     },

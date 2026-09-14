@@ -1,10 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
 import { SupabaseService } from '../supabase/supabase.service.js';
 import { SarvamService } from '../sarvam/sarvam.service.js';
+import { TwilioService } from '../twilio/twilio.service.js';
 import { VoiceSessionService } from './voice-session.service.js';
 import { ConversationService } from './conversation.service.js';
+import { MediaStreamService } from './media-stream.service.js';
 import { enforceMaxSentences } from './conversation.types.js';
 import {
   CallRecord,
@@ -57,13 +59,13 @@ export class CallsService {
   private readonly logger = new Logger(CallsService.name);
   private readonly telnyxBaseUrl = 'https://api.telnyx.com/v2';
 
-  // In-memory active call states indexed by call_control_id
+  // In-memory active call states indexed by call_control_id (or Twilio callSid)
   private readonly activeCalls = new Map<string, ActiveCallState>();
 
   // Active call hard deadline supervisor timers
   private readonly activeCallTimers = new Map<string, NodeJS.Timeout>();
 
-  // Transient audio cache for streaming Sarvam Bulbul v3 WAV audio to Telnyx playback_start
+  // Transient audio cache for streaming Sarvam Bulbul v3 WAV audio
   private readonly transientAudioMap = new Map<string, TransientAudioEntry>();
   private readonly audioTtlMs = 60 * 1000; // 60 seconds
 
@@ -75,8 +77,11 @@ export class CallsService {
     private readonly configService: ConfigService,
     private readonly supabaseService: SupabaseService,
     private readonly sarvamService: SarvamService,
+    private readonly twilioService: TwilioService,
     private readonly voiceSessionService: VoiceSessionService,
     private readonly conversationService: ConversationService,
+    @Inject(forwardRef(() => MediaStreamService))
+    private readonly mediaStreamService: MediaStreamService,
   ) {}
 
   /**
@@ -90,10 +95,12 @@ export class CallsService {
   }
 
   /**
-   * Safe retrieval of default Telnyx phone number.
+   * Safe retrieval of default Twilio/Telnyx phone number.
    */
   public getDefaultTelnyxPhoneNumber(): string {
     const num =
+      this.configService.get<string>('TWILIO_PHONE_NUMBER') ??
+      this.configService.get<string>('twilio.phoneNumber') ??
       this.configService.get<string>('TELNYX_PHONE_NUMBER') ??
       this.configService.get<string>('telnyx.phoneNumber');
     return num?.trim() ?? '';
@@ -111,7 +118,7 @@ export class CallsService {
   }
 
   /**
-   * Safe retrieval of the backend public URL used for Telnyx media fetching.
+   * Safe retrieval of the backend public URL used for media fetching.
    */
   public getBackendPublicUrl(): string {
     const url =
@@ -124,11 +131,11 @@ export class CallsService {
   }
 
   // ====================================================================
-  // 1. Telnyx REST API Call Control Actions
+  // 1. Telephony REST Actions (Twilio & Telnyx)
   // ====================================================================
 
   /**
-   * Answers an incoming Telnyx call.
+   * Answers an incoming call.
    */
   public async answerCall(callControlId: string): Promise<boolean> {
     try {
@@ -141,21 +148,23 @@ export class CallsService {
   }
 
   /**
-   * Hangs up an active Telnyx call.
+   * Hangs up an active call via Twilio and Telnyx REST APIs.
    */
   public async hangupCall(callControlId: string): Promise<boolean> {
     try {
+      if (this.twilioService) {
+        await this.twilioService.hangupCall(callControlId);
+      }
       const res = await this.sendTelnyxAction(callControlId, 'hangup', {});
       return res.ok;
     } catch (err: unknown) {
-      this.logger.error(`Failed to hangup call ${callControlId}: ${err}`);
+      this.logger.warn(`Failed to hangup call ${callControlId}: ${err}`);
       return false;
     }
   }
 
   /**
-   * Plays back an audio URL into an active Telnyx call.
-   * This is the PRIMARY production mechanism to deliver Sarvam Bulbul v3 synthesized WAV audio.
+   * Plays audio URL on active call.
    */
   public async playbackAudio(callControlId: string, audioUrl: string): Promise<boolean> {
     try {
@@ -170,7 +179,7 @@ export class CallsService {
   }
 
   /**
-   * Starts real-time bidirectional media streaming from Telnyx to our backend WebSocket gateway.
+   * Starts real-time bidirectional media streaming from carrier to our backend WebSocket gateway.
    */
   public async startMediaStreaming(callControlId: string): Promise<boolean> {
     try {
@@ -192,7 +201,7 @@ export class CallsService {
   }
 
   /**
-   * Stops real-time media streaming from Telnyx.
+   * Stops real-time media streaming.
    */
   public async stopMediaStreaming(callControlId: string): Promise<boolean> {
     try {
@@ -233,7 +242,7 @@ export class CallsService {
   }
 
   /**
-   * Emergency fallback only: Speaks text using Telnyx native TTS if Sarvam audio delivery fails.
+   * Emergency fallback only: Speaks text using native TTS if Sarvam audio delivery fails.
    */
   public async speakText(
     callControlId: string,
@@ -253,7 +262,7 @@ export class CallsService {
   }
 
   /**
-   * Helper to send action POST request to Telnyx Call Control API.
+   * Helper to send action POST request to Call Control API.
    */
   private async sendTelnyxAction(
     callControlId: string,
@@ -262,7 +271,6 @@ export class CallsService {
   ): Promise<Response> {
     const apiKey = this.getTelnyxApiKey();
     if (!apiKey) {
-      this.logger.warn(`TELNYX_API_KEY is not configured. Action "${action}" executed in mock mode.`);
       return new Response(JSON.stringify({ status: 'mock_ok' }), { status: 200 });
     }
 
@@ -278,14 +286,14 @@ export class CallsService {
 
     if (!response.ok && response.status !== 422) {
       const errText = await response.text().catch(() => '');
-      this.logger.warn(`Telnyx action "${action}" responded with status ${response.status}: ${errText}`);
+      this.logger.warn(`Action "${action}" responded with status ${response.status}: ${errText}`);
     }
 
     return response;
   }
 
   // ====================================================================
-  // 2. Transient Audio Cache & Sarvam Audio Playback Dispatch
+  // 2. Transient Audio Cache & Audio Playback Dispatch
   // ====================================================================
 
   /**
@@ -302,7 +310,7 @@ export class CallsService {
   }
 
   /**
-   * Retrieves transient audio buffer for Telnyx streaming endpoint (GET /voice/audio/:audioId.wav).
+   * Retrieves transient audio buffer for streaming endpoint (GET /voice/audio/:audioId.wav).
    * Supports single-use eviction upon consumption to prevent reuse or leaks.
    */
   public getTransientAudio(audioId: string, consume = false): Buffer | null {
@@ -329,14 +337,22 @@ export class CallsService {
   }
 
   /**
-   * Dispatches Sarvam Bulbul v3 generated audio to Telnyx playback_start action.
-   * This guarantees that Sarvam generated audio is delivered to the caller.
+   * Dispatches Sarvam Bulbul v3 generated audio to caller via WebSocket or HTTP playback.
    */
   public async playbackSarvamAudio(callControlId: string, audioBuffer: Buffer): Promise<boolean> {
     if (!audioBuffer || audioBuffer.length === 0) {
       return false;
     }
 
+    // Try WebSocket direct streaming first
+    if (this.mediaStreamService) {
+      const sentViaWs = await this.mediaStreamService.sendAudioToCaller(callControlId, audioBuffer);
+      if (sentViaWs) {
+        return true;
+      }
+    }
+
+    // Fallback: Store transient audio for HTTP playback
     const audioId = this.storeTransientAudio(audioBuffer);
     const audioUrl = `${this.getBackendPublicUrl()}/voice/audio/${audioId}.wav`;
 
@@ -354,8 +370,115 @@ export class CallsService {
   }
 
   // ====================================================================
-  // 3. Webhook Ingestion & Orchestration
+  // 3. Webhook Ingestion & Orchestration (Twilio & Telnyx)
   // ====================================================================
+
+  /**
+   * Handles incoming Twilio Voice Webhook.
+   * Returns TwiML XML string to answer the call and connect to our WebSocket media stream.
+   */
+  public async handleTwilioWebhook(payload: Record<string, unknown>): Promise<string> {
+    const callSid = String(payload.CallSid ?? payload.call_sid ?? payload.call_control_id ?? '');
+    const from = String(payload.From ?? payload.from ?? '');
+    const to = String(payload.To ?? payload.to ?? '');
+    const callStatus = String(payload.CallStatus ?? payload.call_status ?? 'ringing').toLowerCase();
+
+    this.logger.log(`Twilio webhook: callSid=${callSid}, status=${callStatus}, from=${from}, to=${to}`);
+
+    if (['completed', 'failed', 'canceled', 'busy', 'no-answer'].includes(callStatus)) {
+      await this.handleCallHangup({ call_control_id: callSid });
+      return `<?xml version="1.0" encoding="UTF-8"?><Response/>`;
+    }
+
+    if (!callSid) {
+      return this.twilioService.generateTwiML('Invalid call request.');
+    }
+
+    // Look up client by assigned phone number in profiles table
+    const profile = await this.findClientByPhoneNumber(to);
+    if (!profile) {
+      this.logger.warn(`No client profile found for called number "${to}". Rejecting call.`);
+      return this.twilioService.generateTwiML('This number is not configured.');
+    }
+
+    const clientId = profile.id;
+    const balance = profile.token_balance ?? 0;
+
+    // Check zero-balance rule
+    if (balance <= 0) {
+      this.logger.warn(`Client ${clientId} has 0 balance. Rejecting incoming Twilio call.`);
+      return this.twilioService.generateTwiML(
+        'Your account has insufficient minutes. Please recharge.',
+      );
+    }
+
+    // Register active call session
+    const now = new Date();
+    const callRecord = await this.createCallRecordInDb({
+      client_id: clientId,
+      direction: 'inbound',
+      caller_number: from,
+      called_number: to,
+      telnyx_call_id: callSid,
+      status: 'in_progress',
+      language_used: (profile.agent_language ?? 'english').toLowerCase(),
+      started_at: now,
+      transcript: [],
+    });
+
+    const activeCall: ActiveCallState = {
+      callRecordId: callRecord.id,
+      callControlId: callSid,
+      clientId,
+      direction: 'inbound',
+      callerNumber: from,
+      calledNumber: to,
+      startedAt: now,
+      warningGiven: false,
+      language: (profile.agent_language ?? 'english').toLowerCase(),
+      status: 'in_progress',
+      transcript: [],
+    };
+
+    this.activeCalls.set(callSid, activeCall);
+    this.voiceSessionService.createSession(callSid, clientId);
+
+    // Setup 10-minute maximum call duration supervisor timer
+    const maxCallSeconds = Math.min(
+      MAX_CALL_DURATION_SECONDS,
+      Math.max(60, balance * 60),
+    );
+
+    const supervisorTimer = setTimeout(async () => {
+      this.logger.warn(`Call ${callSid} reached time limit of ${maxCallSeconds}s. Terminating.`);
+      await this.hangupCall(callSid);
+      await this.handleCallHangup({ call_control_id: callSid });
+    }, maxCallSeconds * 1000);
+
+    if (supervisorTimer && typeof supervisorTimer === 'object' && 'unref' in supervisorTimer) {
+      supervisorTimer.unref();
+    }
+    this.activeCallTimers.set(callSid, supervisorTimer);
+
+    this.logger.log(`Inbound Twilio call connected for client ${clientId} (CallSid: ${callSid})`);
+
+    // Return TwiML to answer call and connect to WebSocket media stream
+    return this.twilioService.answerCall(callSid);
+  }
+
+  /**
+   * Handles Twilio status callback events (e.g. completed, failed, busy).
+   */
+  public async handleTwilioStatusCallback(payload: Record<string, unknown>): Promise<void> {
+    const callSid = String(payload.CallSid ?? payload.call_sid ?? '');
+    const callStatus = String(payload.CallStatus ?? payload.call_status ?? '').toLowerCase();
+
+    this.logger.log(`Twilio status callback: callSid=${callSid}, status=${callStatus}`);
+
+    if (['completed', 'failed', 'canceled', 'busy', 'no-answer'].includes(callStatus)) {
+      await this.handleCallHangup({ call_control_id: callSid });
+    }
+  }
 
   /**
    * Central entry point for handling Telnyx webhook payloads.
@@ -371,6 +494,19 @@ export class CallsService {
     }
 
     const payload = body as Record<string, unknown>;
+
+    // If Twilio format, handle accordingly
+    if (payload.CallSid || payload.call_sid) {
+      await this.handleTwilioWebhook(payload);
+      return {
+        received: true,
+        status: 'acknowledged',
+        event: 'twilio.voice',
+        call_control_id: String(payload.CallSid ?? payload.call_sid),
+        message: 'Twilio webhook processed',
+      };
+    }
+
     const eventData = (payload.data ?? payload) as Record<string, unknown>;
     const eventType = (eventData.event_type ?? payload.event_type) as string | undefined;
     const eventId = (eventData.id ?? payload.id) as string | undefined;
@@ -431,7 +567,7 @@ export class CallsService {
           break;
 
         default:
-          this.logger.debug?.(`Unhandled Telnyx event: ${eventType}`);
+          this.logger.debug?.(`Unhandled event: ${eventType}`);
           break;
       }
 
@@ -457,16 +593,12 @@ export class CallsService {
   }
 
   /**
-   * Handles incoming / initiated call:
-   * 1. Resolves tenant client by called number (profiles.telnyx_number).
-   * 2. Checks token balance > 0 (prevents zero-balance calls).
-   * 3. Answers call and creates database record & voice session.
-   * 4. Schedules server-side 10-minute hard deadline & balance-exhaustion supervisor.
+   * Handles incoming / initiated call.
    */
   public async handleCallInitiated(callPayload: Record<string, unknown>): Promise<void> {
-    const callControlId = String(callPayload.call_control_id ?? '');
-    const to = String(callPayload.to ?? '');
-    const from = String(callPayload.from ?? '');
+    const callControlId = String(callPayload.call_control_id ?? callPayload.CallSid ?? '');
+    const to = String(callPayload.to ?? callPayload.To ?? '');
+    const from = String(callPayload.from ?? callPayload.From ?? '');
 
     if (!callControlId) {
       this.logger.warn('call.initiated missing call_control_id');
@@ -504,9 +636,6 @@ export class CallsService {
     await this.answerCall(callControlId);
 
     const now = new Date();
-    const language = (profile.agent_language ?? 'english').toLowerCase();
-
-    // Create DB call record
     const callRecord = await this.createCallRecordInDb({
       client_id: clientId,
       direction: 'inbound',
@@ -514,24 +643,12 @@ export class CallsService {
       called_number: to,
       telnyx_call_id: callControlId,
       status: 'in_progress',
-      language_used: language,
+      language_used: (profile.agent_language ?? 'english').toLowerCase(),
       started_at: now,
       transcript: [],
     });
 
-    // Create session in VoiceSessionService
-    this.voiceSessionService.createSession({
-      sessionId: callControlId,
-      clientId,
-      telnyxCallId: callControlId,
-      callerNumber: from,
-      calledNumber: to,
-      language: language.includes('hindi') ? 'hindi' : 'english',
-      status: 'active',
-    });
-
-    // Track active call state in-memory
-    this.activeCalls.set(callControlId, {
+    const activeCall: ActiveCallState = {
       callRecordId: callRecord.id,
       callControlId,
       clientId,
@@ -540,32 +657,26 @@ export class CallsService {
       calledNumber: to,
       startedAt: now,
       warningGiven: false,
-      language,
+      language: (profile.agent_language ?? 'english').toLowerCase(),
       status: 'in_progress',
       transcript: [],
-    });
+    };
 
-    // Server-side Hard Deadline & Balance Supervisor Timer
-    // Enforces hard termination at 10-minutes OR available balance limit even if caller is silent
-    const maxCallSeconds = Math.min(MAX_CALL_DURATION_SECONDS, balance * 60);
-    this.clearSupervisorTimer(callControlId);
+    this.activeCalls.set(callControlId, activeCall);
+    this.voiceSessionService.createSession(callControlId, clientId);
+
+    // Setup 10-minute maximum call duration supervisor timer
+    const maxCallSeconds = Math.min(
+      MAX_CALL_DURATION_SECONDS,
+      Math.max(60, balance * 60),
+    );
 
     const supervisorTimer = setTimeout(async () => {
-      this.logger.warn(
-        `Call supervisor deadline reached for control ID ${callControlId} (${maxCallSeconds}s). Enforcing termination.`,
-      );
-      try {
-        const active = this.activeCalls.get(callControlId);
-        const isHindi = active?.language.includes('hindi');
-        const limitMsg =
-          maxCallSeconds < MAX_CALL_DURATION_SECONDS
-            ? isHindi
-              ? CALL_MESSAGES.INSUFFICIENT_BALANCE_HI
-              : CALL_MESSAGES.INSUFFICIENT_BALANCE_EN
-            : isHindi
-              ? CALL_MESSAGES.MAX_DURATION_HI
-              : CALL_MESSAGES.MAX_DURATION_EN;
+      this.logger.warn(`Call ${callControlId} reached time limit of ${maxCallSeconds}s. Terminating.`);
+      const isHindi = (profile.agent_language ?? '').toLowerCase().includes('hindi');
+      const limitMsg = isHindi ? CALL_MESSAGES.TIME_LIMIT_HI : CALL_MESSAGES.TIME_LIMIT_EN;
 
+      try {
         await this.speakText(callControlId, {
           payload: limitMsg,
           language: isHindi ? 'hi-IN' : 'en-US',
@@ -591,7 +702,7 @@ export class CallsService {
    * Synthesizes and plays greeting using Sarvam Bulbul v3 TTS.
    */
   public async handleCallAnswered(callPayload: Record<string, unknown>): Promise<void> {
-    const callControlId = String(callPayload.call_control_id ?? '');
+    const callControlId = String(callPayload.call_control_id ?? callPayload.CallSid ?? '');
     const activeCall = this.activeCalls.get(callControlId);
 
     if (!activeCall) {
@@ -638,7 +749,7 @@ export class CallsService {
       });
     }
 
-    // Start real-time bidirectional media streaming from Telnyx to our WebSocket media gateway
+    // Start real-time bidirectional media streaming from carrier
     await this.startMediaStreaming(callControlId);
   }
 
@@ -671,7 +782,7 @@ export class CallsService {
       }
     }
 
-    // Process utterance through Sarvam STT -> RAG -> Sarvam TTS -> Telnyx Playback
+    // Process utterance through Sarvam STT -> RAG -> Sarvam TTS -> Playback
     await this.processCallerUtterance(callControlId, {
       audioBuffer,
       transcript: directSpeech,
@@ -680,7 +791,7 @@ export class CallsService {
 
   /**
    * Handles call.playback.ended:
-   * Keeps conversation turn flowing by initiating caller audio listening.
+   * Keeps conversation turn flowing by updating activity.
    */
   public async handlePlaybackEnded(callPayload: Record<string, unknown>): Promise<void> {
     const callControlId = String(callPayload.call_control_id ?? '');
@@ -698,7 +809,7 @@ export class CallsService {
    * 5. Removes session from VoiceSessionService and active call state.
    */
   public async handleCallHangup(callPayload: Record<string, unknown>): Promise<void> {
-    const callControlId = String(callPayload.call_control_id ?? '');
+    const callControlId = String(callPayload.call_control_id ?? callPayload.CallSid ?? '');
     this.clearSupervisorTimer(callControlId);
     await this.stopMediaStreaming(callControlId);
 
@@ -751,7 +862,7 @@ export class CallsService {
    * - Consecutive empty STT safety (3 = prompt, 5 = terminate)
    * - 10 conversation turns limit
    * - Document-only RAG response via ConversationService
-   * - Sarvam Bulbul v3 TTS audio synthesis and Telnyx playback_start delivery
+   * - Sarvam Bulbul v3 TTS audio synthesis and audio delivery
    */
   public async processCallerUtterance(
     callControlId: string,
@@ -768,28 +879,23 @@ export class CallsService {
       };
     }
 
-    const now = Date.now();
-    const elapsedSeconds = Math.floor((now - activeCall.startedAt.getTime()) / 1000);
-    const isHindi = activeCall.language.includes('hindi');
+    this.voiceSessionService.updateActivity(callControlId);
 
-    // 1. Check 10-Minute Call Limit
+    const now = new Date();
+    const elapsedSeconds = Math.floor((now.getTime() - activeCall.startedAt.getTime()) / 1000);
+
+    // 1. Guardrail: 10-Minute Hard Duration Limit
     if (elapsedSeconds >= MAX_CALL_DURATION_SECONDS) {
-      const maxMsg = isHindi ? CALL_MESSAGES.MAX_DURATION_HI : CALL_MESSAGES.MAX_DURATION_EN;
-      activeCall.transcript.push({
-        role: 'assistant',
-        content: maxMsg,
-        timestamp: new Date().toISOString(),
-        source: 'limit',
-      });
+      this.logger.warn(`Call ${callControlId} reached maximum duration limit (600s). Terminating.`);
+      const isHindi = activeCall.language.includes('hindi');
+      const limitMsg = isHindi ? CALL_MESSAGES.TIME_LIMIT_HI : CALL_MESSAGES.TIME_LIMIT_EN;
 
-      await this.speakText(callControlId, {
-        payload: maxMsg,
-        language: isHindi ? 'hi-IN' : 'en-US',
-      });
+      await this.playbackSarvamAudio(callControlId, Buffer.from(limitMsg));
       await this.hangupCall(callControlId);
+      await this.handleCallHangup({ call_control_id: callControlId });
 
       return {
-        responseText: maxMsg,
+        responseText: limitMsg,
         source: 'limit',
         hangup: true,
       };
@@ -799,59 +905,41 @@ export class CallsService {
     let transcriptText = input.transcript ?? '';
     if (!transcriptText && input.audioBuffer && input.audioBuffer.length > 0) {
       try {
-        const sttResult = await this.sarvamService.speechToText(input.audioBuffer);
-        transcriptText = (typeof sttResult === 'string' ? sttResult : (sttResult as any)?.transcript ?? '').trim();
+        transcriptText = await this.sarvamService.speechToText(input.audioBuffer);
       } catch (err: unknown) {
-        this.logger.warn(`STT transcription failed for call ${callControlId}: ${err}`);
-        transcriptText = '';
+        this.logger.warn(`STT transcription failure for call ${callControlId}: ${err}`);
       }
     }
 
-    // 3. Handle Empty STT Detection (Silence / Noise)
-    if (!transcriptText || transcriptText.trim().length === 0) {
+    transcriptText = (transcriptText ?? '').trim();
+
+    // 3. Handle Empty / Silent Audio Input (Safety thresholds)
+    if (!transcriptText) {
       const emptyCount = this.voiceSessionService.incrementEmptySttCount(callControlId);
+      this.logger.debug?.(`Empty STT count for call ${callControlId}: ${emptyCount}`);
+
+      const isHindi = activeCall.language.includes('hindi');
 
       if (emptyCount >= EMPTY_STT_TERMINATE_THRESHOLD) {
-        const termMsg = isHindi
-          ? CALL_MESSAGES.EMPTY_STT_TERMINATE_HI
-          : CALL_MESSAGES.EMPTY_STT_TERMINATE_EN;
+        // Terminate call after 5 consecutive empty frames
+        this.logger.warn(`Call ${callControlId} reached 5 consecutive empty STT triggers. Terminating call.`);
+        const goodbyeMsg = isHindi ? CALL_MESSAGES.GOODBYE_HI : CALL_MESSAGES.GOODBYE_EN;
 
-        activeCall.transcript.push({
-          role: 'assistant',
-          content: termMsg,
-          timestamp: new Date().toISOString(),
-          source: 'system',
-        });
-
-        await this.speakText(callControlId, {
-          payload: termMsg,
-          language: isHindi ? 'hi-IN' : 'en-US',
-        });
+        await this.playbackSarvamAudio(callControlId, Buffer.from(goodbyeMsg));
         await this.hangupCall(callControlId);
+        await this.handleCallHangup({ call_control_id: callControlId });
 
         return {
-          responseText: termMsg,
+          responseText: goodbyeMsg,
           source: 'system',
           hangup: true,
         };
       }
 
       if (emptyCount >= EMPTY_STT_PROMPT_THRESHOLD) {
-        const promptMsg = isHindi
-          ? CALL_MESSAGES.EMPTY_STT_PROMPT_HI
-          : CALL_MESSAGES.EMPTY_STT_PROMPT_EN;
-
-        activeCall.transcript.push({
-          role: 'assistant',
-          content: promptMsg,
-          timestamp: new Date().toISOString(),
-          source: 'system',
-        });
-
-        await this.speakText(callControlId, {
-          payload: promptMsg,
-          language: isHindi ? 'hi-IN' : 'en-US',
-        });
+        // Prompt caller after 3 consecutive empty frames
+        const promptMsg = isHindi ? CALL_MESSAGES.STILL_THERE_HI : CALL_MESSAGES.STILL_THERE_EN;
+        await this.playbackSarvamAudio(callControlId, Buffer.from(promptMsg));
 
         return {
           responseText: promptMsg,
@@ -867,36 +955,44 @@ export class CallsService {
       };
     }
 
-    // Valid speech received -> reset empty STT count
+    // Non-empty speech: reset empty STT counter
     this.voiceSessionService.resetEmptySttCount(callControlId);
 
-    // 4. Dynamic Caller Language Detection
-    const detectedLanguage = this.sarvamService.detectLanguage(transcriptText);
-    if (detectedLanguage) {
-      activeCall.language = detectedLanguage;
-      this.voiceSessionService.updateSession(callControlId, {
-        language: detectedLanguage === 'hindi' || detectedLanguage === 'hinglish' ? 'hindi' : 'english',
-      });
+    // Record user speech in transcript
+    activeCall.transcript.push({
+      role: 'user',
+      content: transcriptText,
+      timestamp: new Date().toISOString(),
+    });
+
+    // 4. Dynamic Language Detection from Caller Input
+    let detectedLang = 'english';
+    try {
+      detectedLang = await this.sarvamService.detectLanguage(transcriptText);
+      activeCall.language = detectedLang;
+      this.voiceSessionService.updateSession(callControlId, { language: detectedLang as any });
+    } catch {
+      detectedLang = activeCall.language;
     }
 
-    const callerIsHindi = activeCall.language.includes('hindi');
+    const callerIsHindi = detectedLang.includes('hindi');
 
-    // 5. Conversation Turn Limit Check (Max 10 turns)
-    const turnResult = this.voiceSessionService.incrementTurn(callControlId);
-    if (!turnResult.allowed) {
+    // 5. Guardrail: 10 Conversation Turns Limit
+    const turnRes = this.voiceSessionService.incrementTurn(callControlId);
+    if (!turnRes.allowed || turnRes.turnCount > 10) {
+      this.logger.warn(`Call ${callControlId} reached maximum conversation turns limit (10). Ending call.`);
       const maxTurnMsg = callerIsHindi ? CALL_MESSAGES.MAX_TURNS_HI : CALL_MESSAGES.MAX_TURNS_EN;
+
       activeCall.transcript.push({
         role: 'assistant',
         content: maxTurnMsg,
         timestamp: new Date().toISOString(),
-        source: 'limit',
+        source: 'system',
       });
 
-      await this.speakText(callControlId, {
-        payload: maxTurnMsg,
-        language: callerIsHindi ? 'hi-IN' : 'en-US',
-      });
+      await this.playbackSarvamAudio(callControlId, Buffer.from(maxTurnMsg));
       await this.hangupCall(callControlId);
+      await this.handleCallHangup({ call_control_id: callControlId });
 
       return {
         responseText: maxTurnMsg,
@@ -905,30 +1001,27 @@ export class CallsService {
       };
     }
 
-    // Record caller message in transcript
-    activeCall.transcript.push({
-      role: 'user',
-      content: transcriptText,
-      timestamp: new Date().toISOString(),
-    });
-
-    // 6. Generate RAG Answer from uploaded documents (Grounded, Max 2 sentences)
-    const conversationRes = await this.conversationService.generateResponse({
+    // 6. Generate Response using ConversationService RAG (Tenant-Isolated, Document-Only)
+    const ragResponse = await this.conversationService.generateResponse({
       clientId: activeCall.clientId,
       question: transcriptText,
       language: callerIsHindi ? 'hindi' : 'english',
     });
 
-    let finalAnswer = conversationRes.answer;
-    let warningGivenNow = false;
+    let finalAnswer = ragResponse.answer || (ragResponse as any).text || '';
 
-    // 7. Check 3-Minute Warning (triggers after 7 minutes / 420s)
-    // Strictly bounds combined output so it never violates the 2-sentence rule
+    // 7. Guardrail: 3-Minute Remaining Warning Notification (<= 2 short sentences)
+    let warningGivenNow = false;
     if (elapsedSeconds >= WARNING_TRIGGER_ELAPSED_SECONDS && !activeCall.warningGiven) {
       activeCall.warningGiven = true;
       warningGivenNow = true;
-      const warnMsg = callerIsHindi ? CALL_MESSAGES.WARNING_3MIN_HI : CALL_MESSAGES.WARNING_3MIN_EN;
-      finalAnswer = enforceMaxSentences(`${finalAnswer} ${warnMsg}`, 2);
+
+      const warningText = callerIsHindi
+        ? CALL_MESSAGES.WARNING_3MIN_HI
+        : CALL_MESSAGES.WARNING_3MIN_EN;
+
+      const combined = `${finalAnswer} ${warningText}`.trim();
+      finalAnswer = enforceMaxSentences(combined, 2);
     }
 
     // Record assistant response in transcript
@@ -936,7 +1029,7 @@ export class CallsService {
       role: 'assistant',
       content: finalAnswer,
       timestamp: new Date().toISOString(),
-      source: conversationRes.source,
+      source: ragResponse.source,
     });
 
     // 8. Synthesize Audio via Sarvam Bulbul v3 TTS
@@ -951,7 +1044,7 @@ export class CallsService {
       this.logger.warn(`Sarvam TTS synthesis failed: ${err}`);
     }
 
-    // 9. Deliver Sarvam Bulbul v3 Generated Audio to Caller via Telnyx playback_start
+    // 9. Deliver Sarvam Bulbul v3 Generated Audio to Caller
     if (audioBuffer && audioBuffer.length > 0) {
       const playbackSuccess = await this.playbackSarvamAudio(callControlId, audioBuffer);
       if (!playbackSuccess) {
@@ -964,7 +1057,7 @@ export class CallsService {
         });
       }
     } else {
-      // Catastrophic fallback only if Sarvam TTS synthesis completely failed
+      // Emergency fallback only if Sarvam TTS synthesis completely failed
       this.logger.warn(`No Sarvam audio buffer generated for call ${callControlId}, falling back to speakText.`);
       await this.speakText(callControlId, {
         payload: finalAnswer,
@@ -975,7 +1068,7 @@ export class CallsService {
     return {
       responseAudio: audioBuffer,
       responseText: finalAnswer,
-      source: conversationRes.source,
+      source: ragResponse.source,
       hangup: false,
       warningGiven: warningGivenNow,
     };
@@ -989,8 +1082,8 @@ export class CallsService {
    * Initiates an outbound call:
    * 1. Validates client balance > 0.
    * 2. Validates destination phone number (E.164).
-   * 3. Strictly enforces client assigned Telnyx number (prevents caller-ID spoofing).
-   * 4. Calls Telnyx API to dial destination.
+   * 3. Strictly enforces client assigned phone number.
+   * 4. Calls Twilio / Telnyx API to dial destination.
    * 5. Stores outbound call record in database.
    */
   public async initiateOutboundCall(
@@ -1017,50 +1110,60 @@ export class CallsService {
       throw new InsufficientBalanceException(clientId, balance);
     }
 
-    // Security: strictly use client's assigned telnyx number or system default (disallows arbitrary from override)
-    const fromNumber = profile.telnyx_number || this.getDefaultTelnyxPhoneNumber();
+    // Security: strictly use client's assigned number or system default
+    const fromNumber =
+      profile.telnyx_number ||
+      this.twilioService.getDefaultPhoneNumber() ||
+      this.getDefaultTelnyxPhoneNumber();
 
     if (!fromNumber) {
       throw new InvalidPhoneNumberException('No valid caller ID (from) phone number configured');
     }
 
     const toNumber = dto.to.replace(/\s+/g, '');
-    const apiKey = this.getTelnyxApiKey();
-    const connectionId = this.getTelnyxConnectionId();
+    const webhookUrl = `${this.getBackendPublicUrl()}/voice/webhook`;
 
-    let telnyxCallControlId: string | null = null;
+    let callSid: string;
+    try {
+      callSid = await this.twilioService.makeOutboundCall({
+        to: toNumber,
+        from: fromNumber,
+        webhookUrl,
+      });
+    } catch {
+      // Fallback to Telnyx or mock
+      const apiKey = this.getTelnyxApiKey();
+      const connectionId = this.getTelnyxConnectionId();
 
-    if (apiKey) {
-      try {
-        const telnyxRes = await fetch(`${this.telnyxBaseUrl}/calls`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
-            to: toNumber,
-            from: fromNumber,
-            connection_id: connectionId,
-          }),
-        });
+      if (apiKey) {
+        try {
+          const telnyxRes = await fetch(`${this.telnyxBaseUrl}/calls`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+              to: toNumber,
+              from: fromNumber,
+              connection_id: connectionId,
+            }),
+          });
 
-        if (!telnyxRes.ok) {
-          const errBody = await telnyxRes.text().catch(() => '');
-          throw new TelnyxApiException(`Failed to initiate outbound call: ${errBody}`, telnyxRes.status);
+          if (!telnyxRes.ok) {
+            const errBody = await telnyxRes.text().catch(() => '');
+            throw new TelnyxApiException(`Failed to initiate outbound call: ${errBody}`, telnyxRes.status);
+          }
+
+          const resData = (await telnyxRes.json()) as { data?: { call_control_id?: string } };
+          callSid = resData?.data?.call_control_id ?? `call-${Date.now()}`;
+        } catch (subErr: unknown) {
+          if (subErr instanceof TelnyxApiException) throw subErr;
+          throw new TelnyxApiException(subErr instanceof Error ? subErr.message : String(subErr));
         }
-
-        const resData = (await telnyxRes.json()) as { data?: { call_control_id?: string } };
-        telnyxCallControlId = resData?.data?.call_control_id ?? null;
-      } catch (err: unknown) {
-        if (err instanceof TelnyxApiException) {
-          throw err;
-        }
-        throw new TelnyxApiException(err instanceof Error ? err.message : String(err));
+      } else {
+        callSid = `mock-call-${Date.now()}`;
       }
-    } else {
-      // Mock mode for local testing without Telnyx credentials
-      telnyxCallControlId = `mock-telnyx-${Date.now()}`;
     }
 
     // Insert call record
@@ -1069,7 +1172,7 @@ export class CallsService {
       direction: 'outbound',
       caller_number: fromNumber,
       called_number: toNumber,
-      telnyx_call_id: telnyxCallControlId,
+      telnyx_call_id: callSid,
       status: 'in_progress',
       language_used: (profile.agent_language ?? 'english').toLowerCase(),
       started_at: new Date(),
@@ -1078,7 +1181,7 @@ export class CallsService {
 
     return {
       callId: callRecord.id,
-      telnyxCallId: telnyxCallControlId,
+      telnyxCallId: callSid,
       status: 'in_progress',
       direction: 'outbound',
       callerNumber: fromNumber,
@@ -1101,12 +1204,12 @@ export class CallsService {
     const limit = Math.min(100, Math.max(1, query?.limit ?? 20));
     const offset = (page - 1) * limit;
 
-    const supabase = this.supabaseService.getAdminClient();
+    const supabase = this.supabaseService.getClient();
     let dbQuery = supabase
       .from('calls')
       .select('*', { count: 'exact' })
       .eq('client_id', clientId)
-      .order('created_at', { ascending: false })
+      .order('started_at', { ascending: false })
       .range(offset, offset + limit - 1);
 
     if (query?.status) {
@@ -1119,35 +1222,51 @@ export class CallsService {
     const { data, count, error } = await dbQuery;
 
     if (error) {
-      this.logger.error(`Failed to list calls for client ${clientId}: ${error.message}`);
-      return { calls: [], total: 0, page, limit };
+      this.logger.error(`Error listing calls for client ${clientId}: ${error.message}`);
+      throw new Error(`Failed to list calls: ${error.message}`);
     }
 
+    const total = count ?? 0;
+    const totalPages = Math.ceil(total / limit);
+
     return {
-      calls: (data ?? []) as CallRecord[],
-      total: count ?? 0,
+      calls: (data as CallRecord[]) ?? [],
+      total,
       page,
       limit,
+      totalPages,
     };
   }
 
   /**
-   * Retrieves a single call record with strict ownership verification.
+   * Retrieves a specific call by ID, strictly scoped to the authenticated client.
    */
   public async getCallById(clientId: string, callId: string): Promise<CallRecord> {
-    const supabase = this.supabaseService.getAdminClient();
+    const supabase = this.supabaseService.getClient();
     const { data, error } = await supabase
       .from('calls')
       .select('*')
       .eq('id', callId)
+      .eq('client_id', clientId)
       .maybeSingle();
 
-    if (error || !data) {
-      throw new CallNotFoundException(callId);
+    if (error) {
+      this.logger.error(`Error retrieving call ${callId} for client ${clientId}: ${error.message}`);
+      throw new Error(`Failed to get call: ${error.message}`);
     }
 
-    if (data.client_id !== clientId) {
-      throw new UnauthorizedCallAccessException();
+    if (!data) {
+      const { data: anyCall } = await supabase
+        .from('calls')
+        .select('id')
+        .eq('id', callId)
+        .maybeSingle();
+
+      if (anyCall) {
+        throw new UnauthorizedCallAccessException();
+      }
+
+      throw new CallNotFoundException(callId);
     }
 
     return data as CallRecord;
@@ -1158,82 +1277,91 @@ export class CallsService {
   // ====================================================================
 
   /**
-   * Atomically deducts minutes using the deduct_minutes RPC.
+   * Atomically deducts call minutes using Supabase deduct_minutes RPC.
    */
   public async deductMinutes(clientId: string, minutes: number): Promise<DeductMinutesResult> {
-    const supabase = this.supabaseService.getAdminClient();
-    try {
-      const { data, error } = await supabase.rpc('deduct_minutes', {
-        p_client_id: clientId,
-        p_minutes: minutes,
-      });
-
-      if (error) {
-        this.logger.error(`Error executing deduct_minutes RPC for client ${clientId}: ${error.message}`);
-        return {
-          success: false,
-          deducted: 0,
-          minutes_requested: minutes,
-          remaining_balance: 0,
-          client_id: clientId,
-          error: error.message,
-        };
-      }
-
-      return data as DeductMinutesResult;
-    } catch (err: unknown) {
-      this.logger.error(`Exception during deductMinutes: ${err}`);
-      return {
-        success: false,
-        deducted: 0,
-        minutes_requested: minutes,
-        remaining_balance: 0,
-        client_id: clientId,
-        error: String(err),
-      };
+    if (minutes <= 0) {
+      return { success: true, newBalance: 0 };
     }
+
+    const supabase = this.supabaseService.getAdminClient();
+    const { data, error } = await supabase.rpc('deduct_minutes', {
+      p_client_id: clientId,
+      p_minutes: minutes,
+    });
+
+    if (error) {
+      this.logger.error(`Atomic minute deduction failed for client ${clientId}: ${error.message}`);
+      return { success: false, newBalance: 0 };
+    }
+
+    return {
+      success: true,
+      newBalance: Number(data),
+    };
   }
 
   /**
-   * Creates a new record in public.calls.
+   * Resolves client profile from called phone number (profiles.telnyx_number).
    */
+  public async findClientByPhoneNumber(
+    phoneNumber: string,
+  ): Promise<{ id: string; token_balance: number; agent_language: string; telnyx_number: string } | null> {
+    if (!phoneNumber) return null;
+    const cleanNum = phoneNumber.replace(/\s+/g, '');
+    const supabase = this.supabaseService.getAdminClient();
+
+    // 1. Direct match with '+'
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('id, token_balance, agent_language, telnyx_number')
+      .eq('telnyx_number', cleanNum)
+      .maybeSingle();
+
+    if (!error && data) {
+      return data;
+    }
+
+    // 2. Try match without '+'
+    const noPlus = cleanNum.replace(/^\+/, '');
+    const { data: dataNoPlus, error: errNoPlus } = await supabase
+      .from('profiles')
+      .select('id, token_balance, agent_language, telnyx_number')
+      .eq('telnyx_number', noPlus)
+      .maybeSingle();
+
+    if (!errNoPlus && dataNoPlus) {
+      return dataNoPlus;
+    }
+
+    return null;
+  }
+
   private async createCallRecordInDb(record: Partial<CallRecord>): Promise<CallRecord> {
     const supabase = this.supabaseService.getAdminClient();
     const { data, error } = await supabase
       .from('calls')
-      .insert({
-        client_id: record.client_id,
-        direction: record.direction,
-        caller_number: record.caller_number ?? '',
-        called_number: record.called_number ?? '',
-        telnyx_call_id: record.telnyx_call_id ?? null,
-        duration_seconds: record.duration_seconds ?? 0,
-        minutes_used: record.minutes_used ?? 0,
-        transcript: record.transcript ?? [],
-        status: record.status ?? 'in_progress',
-        language_used: record.language_used ?? 'english',
-        started_at: record.started_at ?? new Date(),
-      })
+      .insert(record)
       .select()
       .single();
 
     if (error || !data) {
-      this.logger.error(`Failed to insert call record: ${error?.message}`);
+      this.logger.error(`Failed to create call record in database: ${error?.message}`);
       return {
-        id: `mock-call-${Date.now()}`,
-        client_id: record.client_id!,
-        direction: record.direction!,
+        id: randomUUID(),
+        client_id: record.client_id ?? '',
+        direction: record.direction ?? 'inbound',
         caller_number: record.caller_number ?? '',
         called_number: record.called_number ?? '',
         telnyx_call_id: record.telnyx_call_id ?? null,
-        duration_seconds: record.duration_seconds ?? 0,
-        minutes_used: record.minutes_used ?? 0,
-        transcript: record.transcript ?? [],
-        recording_url: null,
         status: record.status ?? 'in_progress',
+        duration_seconds: 0,
+        minutes_used: 0,
+        recording_url: null,
         language_used: record.language_used ?? 'english',
         started_at: record.started_at ?? new Date(),
         ended_at: null,
+        transcript: record.transcript ?? [],
         created_at: new Date(),
       };
     }
@@ -1241,69 +1369,18 @@ export class CallsService {
     return data as CallRecord;
   }
 
-  /**
-   * Updates an existing record in public.calls.
-   */
   private async updateCallRecordInDb(
-    callId: string,
+    callRecordId: string,
     updates: Partial<CallRecord>,
   ): Promise<void> {
     const supabase = this.supabaseService.getAdminClient();
-    const updatePayload: Record<string, unknown> = {};
+    const { error } = await supabase
+      .from('calls')
+      .update(updates)
+      .eq('id', callRecordId);
 
-    if (updates.status !== undefined) updatePayload.status = updates.status;
-    if (updates.duration_seconds !== undefined)
-      updatePayload.duration_seconds = updates.duration_seconds;
-    if (updates.minutes_used !== undefined)
-      updatePayload.minutes_used = updates.minutes_used;
-    if (updates.transcript !== undefined)
-      updatePayload.transcript = updates.transcript;
-    if (updates.ended_at !== undefined) updatePayload.ended_at = updates.ended_at;
-
-    const { error } = await supabase.from('calls').update(updatePayload).eq('id', callId);
     if (error) {
-      this.logger.error(`Failed to update call record ${callId}: ${error.message}`);
-    }
-  }
-
-  /**
-   * Finds a client profile by assigned Telnyx phone number.
-   */
-  private async findClientByPhoneNumber(
-    phoneNumber: string,
-  ): Promise<{ id: string; token_balance: number; agent_language?: string } | null> {
-    if (!phoneNumber) return null;
-    const cleanNum = phoneNumber.replace(/\s+/g, '');
-    const supabase = this.supabaseService.getAdminClient();
-
-    // Exact match
-    const { data: exact } = await supabase
-      .from('profiles')
-      .select('id, token_balance, agent_language, telnyx_number')
-      .eq('telnyx_number', cleanNum)
-      .maybeSingle();
-
-    if (exact) return exact;
-
-    // Match without leading '+'
-    const noPlus = cleanNum.startsWith('+') ? cleanNum.slice(1) : cleanNum;
-    const { data: withoutPlus } = await supabase
-      .from('profiles')
-      .select('id, token_balance, agent_language, telnyx_number')
-      .eq('telnyx_number', noPlus)
-      .maybeSingle();
-
-    if (withoutPlus) return withoutPlus;
-
-    return null;
-  }
-
-  private cleanOldProcessedEvents(): void {
-    const now = Date.now();
-    for (const [eventId, time] of this.processedEvents.entries()) {
-      if (now - time > this.eventTtlMs) {
-        this.processedEvents.delete(eventId);
-      }
+      this.logger.error(`Failed to update call record ${callRecordId}: ${error.message}`);
     }
   }
 
@@ -1315,12 +1392,20 @@ export class CallsService {
     }
   }
 
-  // Testing helpers
+  private cleanOldProcessedEvents(): void {
+    const cutoff = Date.now() - this.eventTtlMs;
+    for (const [id, time] of this.processedEvents.entries()) {
+      if (time < cutoff) {
+        this.processedEvents.delete(id);
+      }
+    }
+  }
+
   public getActiveCall(callControlId: string): ActiveCallState | undefined {
     return this.activeCalls.get(callControlId);
   }
 
-  public clearActiveCalls(): void {
+  public clearAllActiveCalls(): void {
     for (const timer of this.activeCallTimers.values()) {
       clearTimeout(timer);
     }
@@ -1328,5 +1413,9 @@ export class CallsService {
     this.activeCalls.clear();
     this.processedEvents.clear();
     this.transientAudioMap.clear();
+  }
+
+  public clearActiveCalls(): void {
+    this.clearAllActiveCalls();
   }
 }

@@ -11,6 +11,7 @@ import { VoiceSessionModule } from './voice/voice-session.module.js';
 import { ConversationModule } from './voice/conversation.module.js';
 import { VoiceModule } from './voice/voice.module.js';
 import { CallsModule } from './voice/calls.module.js';
+import { TwilioModule } from './twilio/twilio.module.js';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { CallsModule } from './voice/calls.module.js';
     DocumentsModule,
     PaymentsModule,
     SarvamModule,
+    TwilioModule,
     VoiceSessionModule,
     ConversationModule,
     CallsModule,

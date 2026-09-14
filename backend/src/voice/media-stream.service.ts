@@ -4,13 +4,14 @@ import { CallsService } from './calls.service.js';
 import { VoiceSessionService } from './voice-session.service.js';
 import {
   decodeMuLawToPcm16,
+  encodePcm16ToMuLaw,
   wrapPcmInWav,
   calculateRmsEnergy,
 } from './audio-codec.util.js';
 
 export interface MediaStreamSession {
-  streamId: string;
-  callControlId: string;
+  streamId: string; // Twilio streamSid or Telnyx stream_id
+  callControlId: string; // Twilio callSid or Telnyx call_control_id
   clientId: string;
   ws?: WebSocket;
   pcmChunks: Buffer[];
@@ -20,31 +21,45 @@ export interface MediaStreamSession {
   lastActiveAt: number;
 }
 
-export interface TelnyxMediaStreamMessage {
-  event: 'start' | 'media' | 'stop' | 'connected';
+export interface TwilioMediaStreamMessage {
+  event: 'connected' | 'start' | 'media' | 'stop' | 'mark';
+  sequenceNumber?: string | number;
   sequence_number?: string | number;
+  streamSid?: string;
   stream_id?: string;
+  callSid?: string;
   call_control_id?: string;
   start?: {
+    streamSid?: string;
     stream_id?: string;
+    callSid?: string;
     call_control_id?: string;
-    call_leg_id?: string;
+    accountSid?: string;
     tracks?: string[];
+    customParameters?: Record<string, string>;
+    mediaFormat?: {
+      encoding?: string;
+      sampleRate?: number;
+      channels?: number;
+    };
     media_format?: {
       encoding?: string;
       sample_rate?: number;
       channels?: number;
     };
-    custom_headers?: Record<string, string>;
   };
   media?: {
     track?: string;
     chunk?: string | number;
     timestamp?: string | number;
-    payload?: string; // base64 encoded audio
+    payload?: string; // base64 encoded G.711 mu-law audio
   };
   stop?: {
+    callSid?: string;
     call_control_id?: string;
+  };
+  mark?: {
+    name?: string;
   };
 }
 
@@ -52,8 +67,9 @@ export interface TelnyxMediaStreamMessage {
 export class MediaStreamService {
   private readonly logger = new Logger(MediaStreamService.name);
 
-  // Active stream sessions keyed by streamId or callControlId
+  // Active stream sessions keyed by streamId (streamSid)
   private readonly streamSessions = new Map<string, MediaStreamSession>();
+  // Mapping of callControlId (callSid) -> streamId (streamSid)
   private readonly callToStreamMap = new Map<string, string>();
 
   // VAD and utterance segmentation thresholds
@@ -70,7 +86,7 @@ export class MediaStreamService {
   ) {}
 
   /**
-   * Handles incoming WebSocket raw message from Telnyx Media Streaming.
+   * Handles incoming WebSocket raw messages from Twilio Media Streams.
    */
   public async handleWebSocketMessage(
     ws: WebSocket,
@@ -79,16 +95,23 @@ export class MediaStreamService {
   ): Promise<void> {
     try {
       const msgStr = typeof rawMessage === 'string' ? rawMessage : rawMessage.toString('utf-8');
-      const payload: TelnyxMediaStreamMessage = JSON.parse(msgStr);
+      const payload: TwilioMediaStreamMessage = JSON.parse(msgStr);
 
       switch (payload.event) {
-        case 'start':
         case 'connected':
+          this.logger.log('Twilio Media Stream WebSocket handshake connected');
+          break;
+
+        case 'start':
           await this.handleStartEvent(ws, payload, urlCallControlId);
           break;
 
         case 'media':
           await this.handleMediaEvent(ws, payload, urlCallControlId);
+          break;
+
+        case 'mark':
+          this.logger.debug?.(`Received Twilio media mark: ${payload.mark?.name ?? 'unknown'}`);
           break;
 
         case 'stop':
@@ -105,21 +128,30 @@ export class MediaStreamService {
   }
 
   /**
-   * Initializes a media stream session when Telnyx sends 'start' or 'connected'.
+   * Initializes a media stream session when Twilio sends 'start'.
    */
   public async handleStartEvent(
     ws: WebSocket,
-    payload: TelnyxMediaStreamMessage,
+    payload: TwilioMediaStreamMessage,
     urlCallControlId?: string,
   ): Promise<boolean> {
-    const streamId = payload.stream_id ?? payload.start?.stream_id ?? `stream-${Date.now()}`;
+    const streamId =
+      payload.streamSid ??
+      payload.stream_id ??
+      payload.start?.streamSid ??
+      payload.start?.stream_id ??
+      `stream-${Date.now()}`;
+
     const callControlId =
+      payload.start?.callSid ??
+      payload.callSid ??
+      payload.start?.customParameters?.call_control_id ??
       payload.call_control_id ??
       payload.start?.call_control_id ??
       urlCallControlId;
 
     if (!callControlId) {
-      this.logger.warn(`Media stream start rejected: Missing call_control_id (stream: ${streamId})`);
+      this.logger.warn(`Media stream start rejected: Missing callSid / callControlId (stream: ${streamId})`);
       return false;
     }
 
@@ -149,7 +181,7 @@ export class MediaStreamService {
 
     this.voiceSessionService.updateActivity(callControlId);
     this.logger.log(
-      `Media stream session started for call ${callControlId} (client: ${activeCall.clientId}, stream: ${streamId})`,
+      `Twilio media stream session established for call ${callControlId} (client: ${activeCall.clientId}, stream: ${streamId})`,
     );
 
     return true;
@@ -161,16 +193,17 @@ export class MediaStreamService {
    */
   public async handleMediaEvent(
     _ws: WebSocket,
-    payload: TelnyxMediaStreamMessage,
+    payload: TwilioMediaStreamMessage,
     urlCallControlId?: string,
   ): Promise<void> {
     const streamId =
+      payload.streamSid ??
       payload.stream_id ??
       (urlCallControlId ? this.callToStreamMap.get(urlCallControlId) : undefined);
 
     let session = streamId ? this.streamSessions.get(streamId) : undefined;
 
-    // Fallback: If start event was skipped or delayed, create session on first media event
+    // Fallback: If start event was delayed or URL param was provided
     if (!session && urlCallControlId) {
       const activeCall = this.callsService.getActiveCall(urlCallControlId);
       if (activeCall) {
@@ -280,6 +313,78 @@ export class MediaStreamService {
   }
 
   /**
+   * Sends synthesized audio (WAV or Linear PCM) back to caller through active Twilio WebSocket media stream.
+   * Encodes 16-bit Linear PCM to G.711 mu-law, chunks into 20ms frames, and sends media events.
+   */
+  public async sendAudioToCaller(callControlId: string, audioBuffer: Buffer): Promise<boolean> {
+    if (!audioBuffer || audioBuffer.length === 0) {
+      return false;
+    }
+
+    const streamId = this.callToStreamMap.get(callControlId);
+    if (!streamId) {
+      this.logger.debug?.(`No active streamId found for call ${callControlId}`);
+      return false;
+    }
+
+    const session = this.streamSessions.get(streamId);
+    if (!session || !session.ws) {
+      this.logger.debug?.(`No active WebSocket session found for stream ${streamId}`);
+      return false;
+    }
+
+    // Check WebSocket open state
+    const ws = session.ws;
+    if (ws.readyState !== 1 /* WebSocket.OPEN */) {
+      this.logger.warn(`WebSocket for call ${callControlId} is not open (readyState: ${ws.readyState})`);
+      return false;
+    }
+
+    try {
+      // If audio has 44-byte RIFF header, extract the raw Linear PCM data
+      let pcmData = audioBuffer;
+      if (audioBuffer.length > 44 && audioBuffer.subarray(0, 4).toString('ascii') === 'RIFF') {
+        pcmData = audioBuffer.subarray(44);
+      }
+
+      // Convert 16-bit Linear PCM to 8-bit G.711 mu-law
+      const muLawAudio = encodePcm16ToMuLaw(pcmData);
+
+      // Stream mu-law audio in 20ms frames (160 bytes per frame at 8000Hz)
+      const frameSize = 160;
+      for (let offset = 0; offset < muLawAudio.length; offset += frameSize) {
+        const chunk = muLawAudio.subarray(offset, Math.min(offset + frameSize, muLawAudio.length));
+        const mediaMsg = JSON.stringify({
+          event: 'media',
+          streamSid: streamId,
+          media: {
+            payload: chunk.toString('base64'),
+          },
+        });
+        ws.send(mediaMsg);
+      }
+
+      // Send mark message to indicate completion of audio dispatch
+      const markMsg = JSON.stringify({
+        event: 'mark',
+        streamSid: streamId,
+        mark: {
+          name: 'agent-response-complete',
+        },
+      });
+      ws.send(markMsg);
+
+      this.logger.log(
+        `Dispatched synthesized audio (${muLawAudio.length} bytes mu-law) to caller on stream ${streamId}`,
+      );
+      return true;
+    } catch (err: unknown) {
+      this.logger.error(`Failed to send audio over WebSocket for call ${callControlId}: ${err}`);
+      return false;
+    }
+  }
+
+  /**
    * Resets speech buffering counters for a session.
    */
   private resetUtteranceState(session: MediaStreamSession): void {
@@ -294,10 +399,11 @@ export class MediaStreamService {
    */
   public async handleStopEvent(
     _ws: WebSocket,
-    payload: TelnyxMediaStreamMessage,
+    payload: TwilioMediaStreamMessage,
     urlCallControlId?: string,
   ): Promise<void> {
     const streamId =
+      payload.streamSid ??
       payload.stream_id ??
       (urlCallControlId ? this.callToStreamMap.get(urlCallControlId) : undefined);
 

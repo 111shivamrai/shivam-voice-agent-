@@ -56,14 +56,16 @@ export interface CallListResponse {
   total: number;
   page: number;
   limit: number;
+  totalPages?: number;
 }
 
 export interface DeductMinutesResult {
   success: boolean;
-  deducted: number;
-  minutes_requested: number;
-  remaining_balance: number;
-  client_id: string;
+  deducted?: number;
+  minutes_requested?: number;
+  remaining_balance?: number;
+  newBalance?: number;
+  client_id?: string;
   error?: string;
   message?: string;
 }
@@ -111,12 +113,18 @@ export const CALL_MESSAGES = {
   
   MAX_DURATION_EN: 'This call has reached the maximum 10-minute duration limit. Thank you for calling.',
   MAX_DURATION_HI: 'यह कॉल 10 मिनट की अधिकतम समय सीमा पर पहुंच गई है। कॉल करने के लिए धन्यवाद।',
+  TIME_LIMIT_EN: 'This call has reached the maximum 10-minute duration limit. Thank you for calling.',
+  TIME_LIMIT_HI: 'यह कॉल 10 मिनट की अधिकतम समय सीमा पर पहुंच गई है। कॉल करने के लिए धन्यवाद।',
   
   EMPTY_STT_PROMPT_EN: 'Are you still there? Please ask your question.',
   EMPTY_STT_PROMPT_HI: 'क्या आप अभी भी लाइन पर हैं? कृपया अपना प्रश्न पूछें।',
+  STILL_THERE_EN: 'Are you still there? Please ask your question.',
+  STILL_THERE_HI: 'क्या आप अभी भी लाइन पर हैं? कृपया अपना प्रश्न पूछें।',
   
   EMPTY_STT_TERMINATE_EN: 'We have not received any response. The call will now disconnect. Goodbye.',
   EMPTY_STT_TERMINATE_HI: 'हमें कोई प्रतिक्रिया प्राप्त नहीं हुई है। कॉल अब समाप्त हो रही है। धन्यवाद।',
+  GOODBYE_EN: 'We have not received any response. The call will now disconnect. Goodbye.',
+  GOODBYE_HI: 'हमें कोई प्रतिक्रिया प्राप्त नहीं हुई है। कॉल अब समाप्त हो रही है। धन्यवाद।',
   
   MAX_TURNS_EN: 'You have reached the maximum conversation turn limit. Thank you for calling.',
   MAX_TURNS_HI: 'बातचीत की अधिकतम सीमा समाप्त हो गई है। कॉल करने के लिए धन्यवाद।',

@@ -5,6 +5,7 @@ import { SarvamService } from '../sarvam/sarvam.service.js';
 import { VoiceSessionService } from './voice-session.service.js';
 import { ConversationService } from './conversation.service.js';
 import { CallsService } from './calls.service.js';
+import { SupabaseService } from '../supabase/supabase.service.js';
 
 describe('VoiceController', () => {
   let controller: VoiceController;
@@ -67,6 +68,18 @@ describe('VoiceController', () => {
       }),
     };
 
+    const mockSupabaseService = {
+      getClient: jest.fn().mockReturnValue({
+        auth: {
+          getUser: jest.fn().mockResolvedValue({
+            data: { user: { id: 'test-user-id' } },
+            error: null,
+          }),
+        },
+      }),
+      getAdminClient: jest.fn(),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       controllers: [VoiceController],
       providers: [
@@ -74,6 +87,7 @@ describe('VoiceController', () => {
         { provide: VoiceSessionService, useValue: mockVoiceSessionService },
         { provide: ConversationService, useValue: mockConversationService },
         { provide: CallsService, useValue: mockCallsService },
+        { provide: SupabaseService, useValue: mockSupabaseService },
       ],
     }).compile();
 

@@ -87,8 +87,16 @@ export class VoiceSessionService implements OnModuleInit, OnModuleDestroy {
    *
    * @throws VoiceSessionConflictException if a session with this sessionId already exists.
    */
-  public createSession(dto: CreateVoiceSessionDto): VoiceSession {
-    if (!dto.sessionId || typeof dto.sessionId !== 'string') {
+  public createSession(
+    dtoOrSessionId: CreateVoiceSessionDto | string,
+    clientId?: string,
+  ): VoiceSession {
+    const dto: CreateVoiceSessionDto =
+      typeof dtoOrSessionId === 'string'
+        ? { sessionId: dtoOrSessionId, clientId: clientId! }
+        : dtoOrSessionId;
+
+    if (!dto || !dto.sessionId || typeof dto.sessionId !== 'string') {
       throw new Error('sessionId must be a non-empty string');
     }
     if (!dto.clientId || typeof dto.clientId !== 'string') {

@@ -5,8 +5,11 @@ import { VoiceSessionModule } from './voice-session.module.js';
 import { ConversationModule } from './conversation.module.js';
 import { CallsModule } from './calls.module.js';
 
+import { SupabaseModule } from '../supabase/supabase.module.js';
+
 @Module({
   imports: [
+    SupabaseModule,
     SarvamModule,
     VoiceSessionModule,
     ConversationModule,
