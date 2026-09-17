@@ -2,6 +2,7 @@ import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import type { WebSocket } from 'ws';
 import { CallsService } from './calls.service.js';
 import { VoiceSessionService } from './voice-session.service.js';
+import { DeepgramService, DeepgramLiveStreamHandle } from '../deepgram/deepgram.service.js';
 import {
   decodeMuLawToPcm16,
   encodePcm16ToMuLaw,
@@ -19,6 +20,7 @@ export interface MediaStreamSession {
   speechFrames: number;
   silenceFrames: number;
   lastActiveAt: number;
+  deepgramStream?: DeepgramLiveStreamHandle;
 }
 
 export interface TwilioMediaStreamMessage {
@@ -72,17 +74,18 @@ export class MediaStreamService {
   // Mapping of callControlId (callSid) -> streamId (streamSid)
   private readonly callToStreamMap = new Map<string, string>();
 
-  // VAD and utterance segmentation thresholds
+  // Phase 4.5 VAD and utterance segmentation thresholds
   // 20ms per frame (160 bytes of 8kHz mu-law -> 320 bytes of 8kHz 16-bit PCM)
   private readonly energyThreshold = 350; // RMS energy threshold for speech detection
   private readonly minSpeechFrames = 10; // ~200ms minimum speech to avoid noise triggers
-  private readonly silenceFramesThreshold = 30; // ~600ms trailing silence to finalize utterance
-  private readonly maxSpeechFrames = 300; // ~6000ms max utterance before auto-flushing
+  private readonly silenceFramesThreshold = 18; // ~360ms trailing silence target
+  private readonly maxSpeechFrames = 400; // ~8000ms max utterance before auto-flushing
 
   constructor(
     @Inject(forwardRef(() => CallsService))
     private readonly callsService: CallsService,
     private readonly voiceSessionService: VoiceSessionService,
+    private readonly deepgramService: DeepgramService,
   ) {}
 
   /**
@@ -164,6 +167,29 @@ export class MediaStreamService {
       return false;
     }
 
+    // Initialize Deepgram Nova-3 Live Streaming WebSocket for this call
+    let deepgramStream: DeepgramLiveStreamHandle | undefined;
+    try {
+      deepgramStream = this.deepgramService.createLiveStream(callControlId, {
+        language: activeCall.language,
+        onTranscript: async (transcript, isFinal, speechFinal) => {
+          if (speechFinal && transcript && transcript.trim()) {
+            this.logger.log(
+              `Deepgram live speech_final received for call ${callControlId}: "${transcript.trim()}"`,
+            );
+            await this.callsService.processCallerUtterance(callControlId, {
+              transcript: transcript.trim(),
+            });
+          }
+        },
+        onError: (err) => {
+          this.logger.debug?.(`Deepgram live stream error on call ${callControlId}: ${err.message}`);
+        },
+      });
+    } catch (err: unknown) {
+      this.logger.warn(`Failed to initialize Deepgram live stream for call ${callControlId}: ${err}`);
+    }
+
     const session: MediaStreamSession = {
       streamId,
       callControlId,
@@ -174,6 +200,7 @@ export class MediaStreamService {
       speechFrames: 0,
       silenceFrames: 0,
       lastActiveAt: Date.now(),
+      deepgramStream,
     };
 
     this.streamSessions.set(streamId, session);
@@ -223,6 +250,20 @@ export class MediaStreamService {
       const activeCall = this.callsService.getActiveCall(urlCallControlId);
       if (activeCall) {
         const autoStreamId = streamId ?? `stream-auto-${Date.now()}`;
+        let deepgramStream: DeepgramLiveStreamHandle | undefined;
+        try {
+          deepgramStream = this.deepgramService.createLiveStream(urlCallControlId, {
+            language: activeCall.language,
+            onTranscript: async (transcript, isFinal, speechFinal) => {
+              if (speechFinal && transcript && transcript.trim()) {
+                await this.callsService.processCallerUtterance(urlCallControlId, {
+                  transcript: transcript.trim(),
+                });
+              }
+            },
+          });
+        } catch {}
+
         session = {
           streamId: autoStreamId,
           callControlId: urlCallControlId,
@@ -232,6 +273,7 @@ export class MediaStreamService {
           speechFrames: 0,
           silenceFrames: 0,
           lastActiveAt: Date.now(),
+          deepgramStream,
         };
         this.streamSessions.set(autoStreamId, session);
         this.callToStreamMap.set(urlCallControlId, autoStreamId);
@@ -266,6 +308,12 @@ export class MediaStreamService {
 
     // Convert 8000Hz G.711 mu-law chunk to 16-bit Linear PCM
     const pcmChunk = decodeMuLawToPcm16(rawBuffer);
+
+    // Forward raw Linear PCM frame directly to Deepgram live streaming WebSocket
+    if (session.deepgramStream && session.deepgramStream.isActive()) {
+      session.deepgramStream.sendAudio(pcmChunk);
+    }
+
     const rms = calculateRmsEnergy(pcmChunk);
 
     if (rms >= this.energyThreshold) {
@@ -275,7 +323,7 @@ export class MediaStreamService {
       session.silenceFrames = 0;
       session.pcmChunks.push(pcmChunk);
 
-      // Guard: If utterance exceeds max duration (~6s), flush immediately to avoid latency
+      // Guard: If utterance exceeds max duration (~8s), flush immediately
       if (session.speechFrames >= this.maxSpeechFrames) {
         await this.flushUtterance(session);
       }
@@ -449,6 +497,9 @@ export class MediaStreamService {
   public cleanupSession(streamId: string): void {
     const session = this.streamSessions.get(streamId);
     if (session) {
+      try {
+        session.deepgramStream?.close();
+      } catch {}
       this.callToStreamMap.delete(session.callControlId);
       this.streamSessions.delete(streamId);
       this.logger.log(`Media stream session cleaned up: ${streamId} (call: ${session.callControlId})`);

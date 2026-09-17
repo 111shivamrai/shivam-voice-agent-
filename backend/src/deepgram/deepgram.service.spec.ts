@@ -7,6 +7,15 @@ import * as deepgramSdk from '@deepgram/sdk';
 // Mock @deepgram/sdk
 jest.mock('@deepgram/sdk', () => ({
   createClient: jest.fn(),
+  LiveTranscriptionEvents: {
+    Open: 'Open',
+    Close: 'Close',
+    Transcript: 'Transcript',
+    Error: 'Error',
+    Metadata: 'Metadata',
+    UtteranceEnd: 'UtteranceEnd',
+    SpeechStarted: 'SpeechStarted',
+  },
 }));
 
 /**
@@ -57,11 +66,18 @@ describe('DeepgramService', () => {
       error: null,
     });
 
+    const mockLiveConnection = {
+      on: jest.fn(),
+      send: jest.fn(),
+      finish: jest.fn(),
+    };
+
     mockDeepgramClient = {
       listen: {
         prerecorded: {
           transcribeFile: mockTranscribeFile,
         },
+        live: jest.fn().mockReturnValue(mockLiveConnection),
       },
     };
 
@@ -440,6 +456,139 @@ describe('DeepgramService', () => {
       expect(res1).toBe('Caller 1 utterance');
       expect(res2).toBe('Caller 2 utterance');
       expect(mockTranscribeFile).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // ====================================================================
+  // 9. Phase 4.5 Prompt 3: Nova-3 Live WebSocket Streaming
+  // ====================================================================
+  describe('createLiveStream', () => {
+    let eventHandlers: Record<string, Function>;
+    let mockLiveConn: any;
+
+    beforeEach(() => {
+      eventHandlers = {};
+      mockLiveConn = {
+        on: jest.fn().mockImplementation((event: string, handler: Function) => {
+          eventHandlers[event] = handler;
+        }),
+        send: jest.fn(),
+        finish: jest.fn(),
+      };
+      mockDeepgramClient.listen.live.mockReturnValue(mockLiveConn);
+    });
+
+    it('27. should configure live stream with linear16 8000Hz, endpointing 350, and interim_results', () => {
+      const onTranscript = jest.fn();
+      const stream = service.createLiveStream('session-1', {
+        language: 'english',
+        onTranscript,
+      });
+
+      expect(mockDeepgramClient.listen.live).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: 'nova-3',
+          language: 'en-IN',
+          encoding: 'linear16',
+          sample_rate: 8000,
+          channels: 1,
+          endpointing: 350,
+          interim_results: true,
+          vad_events: true,
+        }),
+      );
+      expect(stream).toBeDefined();
+    });
+
+    it('28. should send audio frames only when stream is active', () => {
+      const stream = service.createLiveStream('session-2', {
+        language: 'english',
+        onTranscript: jest.fn(),
+      });
+
+      // Before open event, sending does nothing
+      const chunk = Buffer.from([1, 2, 3]);
+      stream.sendAudio(chunk);
+      expect(mockLiveConn.send).not.toHaveBeenCalled();
+
+      // Trigger open event
+      eventHandlers['Open']();
+      expect(stream.isActive()).toBe(true);
+
+      stream.sendAudio(chunk);
+      expect(mockLiveConn.send).toHaveBeenCalled();
+    });
+
+    it('29. should accumulate is_final segments and emit full utterance on speech_final', () => {
+      const onTranscript = jest.fn();
+      service.createLiveStream('session-3', {
+        language: 'english',
+        onTranscript,
+      });
+
+      eventHandlers['Open']();
+
+      // Interim result (not final)
+      eventHandlers['Transcript']({
+        is_final: false,
+        speech_final: false,
+        channel: { alternatives: [{ transcript: 'What is' }] },
+      });
+      expect(onTranscript).toHaveBeenCalledWith('What is', false, false);
+
+      // First final segment
+      eventHandlers['Transcript']({
+        is_final: true,
+        speech_final: false,
+        channel: { alternatives: [{ transcript: 'What is your' }] },
+      });
+
+      // Second final segment
+      eventHandlers['Transcript']({
+        is_final: true,
+        speech_final: false,
+        channel: { alternatives: [{ transcript: 'pricing plan?' }] },
+      });
+
+      // Speech final event
+      eventHandlers['Transcript']({
+        is_final: true,
+        speech_final: true,
+        channel: { alternatives: [{ transcript: '' }] },
+      });
+
+      expect(onTranscript).toHaveBeenCalledWith('What is your pricing plan?', true, true);
+    });
+
+    it('30. should clean up session on close and finish', () => {
+      const onClose = jest.fn();
+      const stream = service.createLiveStream('session-4', {
+        language: 'english',
+        onTranscript: jest.fn(),
+        onClose,
+      });
+
+      eventHandlers['Open']();
+      expect(stream.isActive()).toBe(true);
+
+      stream.finish();
+      expect(mockLiveConn.finish).toHaveBeenCalled();
+
+      eventHandlers['Close']();
+      expect(stream.isActive()).toBe(false);
+      expect(onClose).toHaveBeenCalled();
+    });
+
+    it('31. should handle closeAllLiveStreams on shutdown gracefully', () => {
+      const stream = service.createLiveStream('session-5', {
+        language: 'english',
+        onTranscript: jest.fn(),
+      });
+      eventHandlers['Open']();
+
+      service.closeAllLiveStreams();
+      expect(stream.isActive()).toBe(false);
+      expect(mockLiveConn.finish).toHaveBeenCalled();
     });
   });
 });

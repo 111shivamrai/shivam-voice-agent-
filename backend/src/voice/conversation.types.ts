@@ -36,11 +36,13 @@ export const FALLBACK_RESPONSES = {
 } as const;
 
 /**
- * Locked product constants for pgvector retrieval and OpenAI generation.
+ * Locked product constants for pgvector retrieval, embedding cache, and OpenAI generation.
  */
 export const SIMILARITY_THRESHOLD = 0.65;
 export const MAX_CHUNKS_RETRIEVED = 5;
-export const MAX_EMBEDDING_CACHE_SIZE = 100;
+export const MAX_EMBEDDING_CACHE_SIZE = 300;
+export const EMBEDDING_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour TTL
+export const MAX_PRELOAD_CHUNKS = 200;
 export const MAX_OUTPUT_TOKENS = 150;
 export const GPT_TEMPERATURE = 0.3;
 export const EMBEDDING_MODEL = 'text-embedding-3-small';

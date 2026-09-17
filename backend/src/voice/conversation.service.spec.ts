@@ -46,6 +46,8 @@ function getOpenAIMocks(): {
 describe('ConversationService', () => {
   let service: ConversationService;
   let mockRpc: jest.Mock;
+  let mockFrom: jest.Mock;
+  let mockAdminClient: any;
   let mockSupabaseService: { getAdminClient: jest.Mock };
   let mockConfigService: { get: jest.Mock };
 
@@ -83,10 +85,14 @@ describe('ConversationService', () => {
       error: null,
     });
 
+    mockFrom = jest.fn();
+    mockAdminClient = {
+      rpc: mockRpc,
+      from: mockFrom,
+    };
+
     mockSupabaseService = {
-      getAdminClient: jest.fn().mockReturnValue({
-        rpc: mockRpc,
-      }),
+      getAdminClient: jest.fn().mockReturnValue(mockAdminClient),
     };
 
     mockConfigService = {
@@ -140,41 +146,41 @@ describe('ConversationService', () => {
       expect(embeddingsCreate).toHaveBeenCalledTimes(1);
     });
 
-    it('4. cache never exceeds 100 entries', async () => {
-      for (let i = 0; i < 110; i++) {
+    it('4. cache never exceeds 300 entries', async () => {
+      for (let i = 0; i < 310; i++) {
         await service.embedText(`Unique query number ${i}`);
       }
 
-      expect(service.getCacheSize()).toBe(100);
+      expect(service.getCacheSize()).toBe(300);
     });
 
     it('5. cache eviction works deterministically using LRU policy', async () => {
       const { embeddingsCreate } = getOpenAIMocks();
 
-      // Insert entries 0 to 99 (reaches capacity 100)
-      for (let i = 0; i < 100; i++) {
+      // Insert entries 0 to 299 (reaches capacity 300)
+      for (let i = 0; i < 300; i++) {
         await service.embedText(`query-${i}`);
       }
-      expect(service.getCacheSize()).toBe(100);
-      expect(embeddingsCreate).toHaveBeenCalledTimes(100);
+      expect(service.getCacheSize()).toBe(300);
+      expect(embeddingsCreate).toHaveBeenCalledTimes(300);
 
       // Access query-0 again to refresh its LRU timestamp
       await service.embedText('query-0');
       // Should hit cache, not call API
-      expect(embeddingsCreate).toHaveBeenCalledTimes(100);
+      expect(embeddingsCreate).toHaveBeenCalledTimes(300);
 
-      // Insert a 101st entry -> should evict the oldest unaccessed item ('query-1')
-      await service.embedText('query-new-101');
-      expect(service.getCacheSize()).toBe(100);
-      expect(embeddingsCreate).toHaveBeenCalledTimes(101);
+      // Insert a 301st entry -> should evict the oldest unaccessed item ('query-1')
+      await service.embedText('query-new-301');
+      expect(service.getCacheSize()).toBe(300);
+      expect(embeddingsCreate).toHaveBeenCalledTimes(301);
 
       // query-0 should still be in cache
       await service.embedText('query-0');
-      expect(embeddingsCreate).toHaveBeenCalledTimes(101);
+      expect(embeddingsCreate).toHaveBeenCalledTimes(301);
 
       // query-1 was evicted, querying it calls API again
       await service.embedText('query-1');
-      expect(embeddingsCreate).toHaveBeenCalledTimes(102);
+      expect(embeddingsCreate).toHaveBeenCalledTimes(302);
     });
   });
 
@@ -685,6 +691,175 @@ describe('ConversationService', () => {
       expect(CHAT_MODEL).toBe('gpt-4o-mini');
       expect(SIMILARITY_THRESHOLD).toBe(0.65);
       expect(MAX_CHUNKS_RETRIEVED).toBe(5);
+    });
+  });
+
+  describe('Phase 4.5 Prompt 3: In-Memory Preloading & Fast Cosine Similarity', () => {
+    it('31. should preload <= 200 documents into memory and use in-memory cosine similarity', async () => {
+      const mockChunks = [
+        { id: 'c1', chunk_text: 'Our return policy allows 30-day refunds.', embedding: JSON.stringify([1, 0, 0]), client_id: validClientId },
+        { id: 'c2', chunk_text: 'We are open from 9 AM to 5 PM.', embedding: JSON.stringify([0, 1, 0]), client_id: validClientId },
+      ];
+
+      mockFrom.mockReturnValueOnce({
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({
+            limit: jest.fn().mockResolvedValue({ data: mockChunks, error: null }),
+          }),
+        }),
+      });
+
+      await service.preloadClientDocuments(validClientId);
+
+      // Verify in-memory similarity query works without RPC call
+      const results = service.searchPreloadedDocuments(validClientId, [1, 0, 0]);
+      expect(results.length).toBe(1);
+      expect(results[0].chunk_text).toContain('return policy');
+      expect(results[0].similarity).toBeCloseTo(1.0);
+      expect(mockRpc).not.toHaveBeenCalled();
+    });
+
+    it('32. should fallback to Supabase match_documents RPC when chunks exceed 200', async () => {
+      const largeChunks = Array.from({ length: 201 }, (_, i) => ({
+        id: `c${i}`,
+        chunk_text: `Chunk ${i}`,
+        embedding: JSON.stringify([1, 0, 0]),
+        client_id: validClientId,
+      }));
+
+      mockFrom.mockReturnValueOnce({
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({
+            limit: jest.fn().mockResolvedValue({ data: largeChunks, error: null }),
+          }),
+        }),
+      });
+
+      await service.preloadClientDocuments(validClientId);
+
+      mockRpc.mockResolvedValueOnce({
+        data: [{ id: 'rpc-1', chunk_text: 'RPC matched content', similarity: 0.88 }],
+        error: null,
+      });
+
+      const res = await service.generateResponse({
+        clientId: validClientId,
+        question: 'query exceeding 200',
+        language: 'english',
+      });
+      expect(res.source).toBe('document');
+      expect(mockRpc).toHaveBeenCalledWith('match_documents', expect.objectContaining({ match_client_id: validClientId }));
+    });
+
+    it('33. calculateCosineSimilarity handles dimension mismatch, zero vectors, and NaN/Inf safely', () => {
+      expect(service.calculateCosineSimilarity([1, 0], [1, 0, 0])).toBe(0);
+      expect(service.calculateCosineSimilarity([], [])).toBe(0);
+      expect(service.calculateCosineSimilarity([0, 0, 0], [0, 0, 0])).toBe(0);
+      expect(service.calculateCosineSimilarity([NaN, 1], [1, 0])).toBe(0);
+      expect(service.calculateCosineSimilarity([Infinity, 1], [1, 0])).toBe(0);
+      expect(service.calculateCosineSimilarity([1, 0, 0], [1, 0, 0])).toBeCloseTo(1.0);
+      expect(service.calculateCosineSimilarity([1, 0, 0], [0, 1, 0])).toBeCloseTo(0.0);
+    });
+
+    it('34. extractFirstSentence handles abbreviations, decimals, and Hindi punctuation correctly', () => {
+      // Decimals and currency
+      const s1 = service.extractFirstSentence('The total price is $12.50 for the subscription. Next billing is monthly.');
+      expect(s1?.sentence).toBe('The total price is $12.50 for the subscription.');
+      expect(s1?.remaining).toBe('Next billing is monthly.');
+
+      // Abbreviations
+      const s2 = service.extractFirstSentence('Please contact Dr. Smith or Mr. Jones for more details. They are available tomorrow.');
+      expect(s2?.sentence).toBe('Please contact Dr. Smith or Mr. Jones for more details.');
+
+      // Hindi purna viram
+      const s3 = service.extractFirstSentence('हमारी दुकान सुबह 9 बजे खुलती है। आपका स्वागत है॥');
+      expect(s3?.sentence).toBe('हमारी दुकान सुबह 9 बजे खुलती है।');
+      expect(s3?.remaining).toBe('आपका स्वागत है॥');
+    });
+
+    it('35. generateResponseStream emits sentences incrementally and limits to 2 sentences max', async () => {
+      const mockChunks = [
+        { id: 'c1', chunk_text: 'Store hours are 9 AM to 6 PM Monday to Friday. Closed on Sundays.', embedding: JSON.stringify([1, 0, 0]), client_id: validClientId },
+      ];
+
+      mockFrom.mockReturnValueOnce({
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({
+            limit: jest.fn().mockResolvedValue({ data: mockChunks, error: null }),
+          }),
+        }),
+      });
+
+      await service.preloadClientDocuments(validClientId);
+
+      const { embeddingsCreate, chatCompletionsCreate } = getOpenAIMocks();
+      embeddingsCreate.mockResolvedValueOnce({
+        data: [{ embedding: [1, 0, 0] }],
+      });
+
+      // Mock streaming chunks from OpenAI
+      const streamTokens = [
+        'We ', 'are ', 'open ', 'from ', '9 AM ', 'to 6 PM ', 'Monday ', 'to Friday. ',
+        'We ', 'are ', 'closed ', 'on Sundays. ',
+        'Have a great day!'
+      ];
+
+      chatCompletionsCreate.mockResolvedValueOnce({
+        [Symbol.asyncIterator]: async function* () {
+          for (const token of streamTokens) {
+            yield { choices: [{ delta: { content: token } }] };
+          }
+        },
+      });
+
+      const receivedSentences: string[] = [];
+      const res = await service.generateResponseStream(
+        {
+          clientId: validClientId,
+          question: 'What are your hours?',
+          language: 'english',
+        },
+        async (sentence) => {
+          receivedSentences.push(sentence);
+        },
+      );
+
+      expect(receivedSentences.length).toBe(2);
+      expect(receivedSentences[0]).toBe('We are open from 9 AM to 6 PM Monday to Friday.');
+      expect(receivedSentences[1]).toBe('We are closed on Sundays.');
+      expect(res.source).toBe('document');
+      expect(res.answer).toContain('We are open from 9 AM to 6 PM Monday to Friday. We are closed on Sundays.');
+    });
+
+    it('36. generateResponseStream falls back to exact locked message if no documents reach threshold', async () => {
+      // Empty preloaded docs
+      mockFrom.mockReturnValueOnce({
+        select: jest.fn().mockReturnValue({
+          eq: jest.fn().mockReturnValue({
+            limit: jest.fn().mockResolvedValue({ data: [], error: null }),
+          }),
+        }),
+      });
+
+      await service.preloadClientDocuments(validClientId);
+
+      mockRpc.mockResolvedValueOnce({ data: [], error: null });
+
+      const receivedSentences: string[] = [];
+      const res = await service.generateResponseStream(
+        {
+          clientId: validClientId,
+          question: 'Unknown topic?',
+          language: 'english',
+        },
+        async (sentence) => {
+          receivedSentences.push(sentence);
+        },
+      );
+
+      expect(res.source).toBe('fallback');
+      expect(res.answer).toBe(FALLBACK_RESPONSES.english);
+      expect(receivedSentences).toEqual([FALLBACK_RESPONSES.english]);
     });
   });
 });

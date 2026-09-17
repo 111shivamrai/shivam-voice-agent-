@@ -2,12 +2,15 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { MediaStreamService } from './media-stream.service.js';
 import { CallsService } from './calls.service.js';
 import { VoiceSessionService } from './voice-session.service.js';
+import { DeepgramService } from '../deepgram/deepgram.service.js';
 import { pcm16ToMuLawSample } from './audio-codec.util.js';
 
 describe('MediaStreamService', () => {
   let service: MediaStreamService;
   let callsService: jest.Mocked<Partial<CallsService>>;
   let voiceSessionService: jest.Mocked<Partial<VoiceSessionService>>;
+  let deepgramService: jest.Mocked<Partial<DeepgramService>>;
+  let mockLiveStreamHandle: any;
 
   const mockCallControlId1 = 'v3:call_ctrl_aaa_111';
   const mockCallControlId2 = 'v3:call_ctrl_bbb_222';
@@ -64,11 +67,24 @@ describe('MediaStreamService', () => {
       getSession: jest.fn().mockReturnValue({ id: 'sess-1' }),
     };
 
+    mockLiveStreamHandle = {
+      sendAudio: jest.fn(),
+      finish: jest.fn(),
+      close: jest.fn(),
+      isActive: jest.fn().mockReturnValue(true),
+    };
+
+    deepgramService = {
+      createLiveStream: jest.fn().mockReturnValue(mockLiveStreamHandle),
+      closeLiveStream: jest.fn(),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         MediaStreamService,
         { provide: CallsService, useValue: callsService },
         { provide: VoiceSessionService, useValue: voiceSessionService },
+        { provide: DeepgramService, useValue: deepgramService },
       ],
     }).compile();
 
@@ -151,9 +167,9 @@ describe('MediaStreamService', () => {
       // ProcessCallerUtterance should not be called yet while speech is continuing
       expect(callsService.processCallerUtterance).not.toHaveBeenCalled();
 
-      // Send 30 frames of silence (amplitude = 0, 600ms)
+      // Send 18 frames of silence (amplitude = 0, ~360ms)
       const silenceFrame = generateMuLawFrame(0);
-      for (let i = 0; i < 30; i++) {
+      for (let i = 0; i < 18; i++) {
         await service.handleWebSocketMessage(
           mockWs,
           JSON.stringify({
@@ -174,6 +190,85 @@ describe('MediaStreamService', () => {
       expect(utteranceInput.audioBuffer).toBeDefined();
       expect(utteranceInput.audioBuffer.subarray(0, 4).toString('ascii')).toBe('RIFF');
       expect(utteranceInput.audioBuffer.subarray(8, 12).toString('ascii')).toBe('WAVE');
+
+      // Verify Deepgram live stream was created and received audio frames
+      expect(deepgramService.createLiveStream).toHaveBeenCalledWith(
+        mockCallControlId1,
+        expect.any(Object),
+      );
+      expect(mockLiveStreamHandle.sendAudio).toHaveBeenCalled();
+    });
+
+    it('4a. should discard brief audio under 200ms (clicks / noise) without triggering utterance processing', async () => {
+      const mockWs = {} as any;
+      const streamId = 'stream-noise-test';
+
+      await service.handleWebSocketMessage(
+        mockWs,
+        JSON.stringify({
+          event: 'start',
+          stream_id: streamId,
+          call_control_id: mockCallControlId1,
+        }),
+      );
+
+      // Send 5 frames of speech (< 100ms, less than minSpeechFrames=10)
+      const speechFrame = generateMuLawFrame(2000);
+      for (let i = 0; i < 5; i++) {
+        await service.handleWebSocketMessage(
+          mockWs,
+          JSON.stringify({
+            event: 'media',
+            stream_id: streamId,
+            media: { payload: speechFrame.toString('base64') },
+          }),
+        );
+      }
+
+      // Send 18 frames of silence
+      const silenceFrame = generateMuLawFrame(0);
+      for (let i = 0; i < 18; i++) {
+        await service.handleWebSocketMessage(
+          mockWs,
+          JSON.stringify({
+            event: 'media',
+            stream_id: streamId,
+            media: { payload: silenceFrame.toString('base64') },
+          }),
+        );
+      }
+
+      // Utterance should be discarded because speech was under 200ms
+      expect(callsService.processCallerUtterance).not.toHaveBeenCalled();
+    });
+
+    it('4b. should trigger processCallerUtterance immediately when Deepgram speech_final event occurs', async () => {
+      const mockWs = {} as any;
+      const streamId = 'stream-dg-event-test';
+
+      await service.handleWebSocketMessage(
+        mockWs,
+        JSON.stringify({
+          event: 'start',
+          stream_id: streamId,
+          call_control_id: mockCallControlId1,
+        }),
+      );
+
+      // Extract onTranscript callback passed to createLiveStream
+      const createCallArgs = (deepgramService.createLiveStream as jest.Mock).mock.calls[0];
+      const streamOptions = createCallArgs[1];
+
+      // Simulate interim transcript
+      await streamOptions.onTranscript('What are your', false, false);
+      expect(callsService.processCallerUtterance).not.toHaveBeenCalled();
+
+      // Simulate speech_final transcript
+      await streamOptions.onTranscript('What are your opening hours?', true, true);
+      expect(callsService.processCallerUtterance).toHaveBeenCalledWith(
+        mockCallControlId1,
+        { transcript: 'What are your opening hours?' },
+      );
     });
 
     it('5. should reject media frames for terminated / hung up calls', async () => {

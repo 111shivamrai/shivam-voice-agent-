@@ -71,6 +71,9 @@ export class CallsService {
   private readonly transientAudioMap = new Map<string, TransientAudioEntry>();
   private readonly audioTtlMs = 60 * 1000; // 60 seconds
 
+  // Per-call turn identifier tracking for race & interruption protection
+  private readonly activeTurnIds = new Map<string, string>();
+
   // Idempotency tracking for processed webhook event IDs
   private readonly processedEvents = new Map<string, number>();
   private readonly eventTtlMs = 60 * 60 * 1000; // 1 hour
@@ -489,6 +492,11 @@ export class CallsService {
     this.activeCalls.set(callSid, activeCall);
     this.voiceSessionService.createSession(callSid, clientId);
 
+    // Preload client documents (<= 200 chunks) into memory for ultra-low-latency in-memory RAG
+    this.conversationService.preloadClientDocuments(clientId).catch((err: unknown) => {
+      this.logger.debug?.(`Background document preload for client ${clientId}: ${err}`);
+    });
+
     // Setup 10-minute maximum call duration supervisor timer
     const maxCallSeconds = Math.min(
       MAX_CALL_DURATION_SECONDS,
@@ -714,6 +722,11 @@ export class CallsService {
     this.activeCalls.set(callControlId, activeCall);
     this.voiceSessionService.createSession(callControlId, clientId);
 
+    // Preload client documents (<= 200 chunks) into memory for ultra-low-latency in-memory RAG
+    this.conversationService.preloadClientDocuments(clientId).catch((err: unknown) => {
+      this.logger.debug?.(`Background document preload for client ${clientId}: ${err}`);
+    });
+
     // Setup 10-minute maximum call duration supervisor timer
     const maxCallSeconds = Math.min(
       MAX_CALL_DURATION_SECONDS,
@@ -883,6 +896,7 @@ export class CallsService {
 
     // Remove from VoiceSessionService
     this.voiceSessionService.removeSession(callControlId);
+    this.activeTurnIds.delete(callControlId);
 
     this.logger.log(
       `Call ended (ControlId: ${callControlId}): duration=${durationSeconds}s, minutes=${minutesUsed}`,
@@ -1064,12 +1078,42 @@ export class CallsService {
       };
     }
 
-    // 6. Generate Response using ConversationService RAG (Tenant-Isolated, Document-Only)
-    const ragResponse = await this.conversationService.generateResponse({
-      clientId: activeCall.clientId,
-      question: transcriptText,
-      language: callerIsHindi ? 'hindi' : 'english',
-    });
+    // 6. Generate Response using ConversationService RAG with Streaming (Tenant-Isolated, Document-Only)
+    const currentTurnId = `${callControlId}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    this.activeTurnIds.set(callControlId, currentTurnId);
+
+    let firstAudioBuffer: Buffer | undefined;
+    let sentencesStreamed = 0;
+    let audioStreamed = 0;
+
+    const ragResponse = await this.conversationService.generateResponseStream(
+      {
+        clientId: activeCall.clientId,
+        question: transcriptText,
+        language: callerIsHindi ? 'hindi' : 'english',
+      },
+      async (sentence: string) => {
+        sentencesStreamed++;
+        // Race condition / turn cancellation check: ensure call and turn are still current
+        if (this.activeTurnIds.get(callControlId) !== currentTurnId) {
+          return;
+        }
+
+        const sentenceAudio = await this.synthesizeSpeech(sentence, callerIsHindi);
+
+        if (this.activeTurnIds.get(callControlId) !== currentTurnId) {
+          return;
+        }
+
+        if (sentenceAudio && sentenceAudio.length > 0) {
+          audioStreamed++;
+          if (!firstAudioBuffer) {
+            firstAudioBuffer = sentenceAudio;
+          }
+          await this.playbackSarvamAudio(callControlId, sentenceAudio);
+        }
+      },
+    );
 
     let finalAnswer = ragResponse.answer || (ragResponse as any).text || '';
 
@@ -1095,32 +1139,42 @@ export class CallsService {
       source: ragResponse.source,
     });
 
-    // 8. Synthesize Audio via Smallest.ai Lightning V3 (Primary) with Sarvam Bulbul v3 (Fallback)
-    const audioBuffer = await this.synthesizeSpeech(finalAnswer, callerIsHindi);
-
-    // 9. Deliver Generated Audio to Caller
-    if (audioBuffer && audioBuffer.length > 0) {
-      const playbackSuccess = await this.playbackSarvamAudio(callControlId, audioBuffer);
-      if (!playbackSuccess) {
-        this.logger.warn(
-          `playbackSarvamAudio dispatch failed for call ${callControlId}, falling back to speakText.`,
-        );
+    // If no audio chunks were successfully synthesized and played
+    if (audioStreamed === 0) {
+      if (sentencesStreamed === 0) {
+        // No streaming callback invoked, synthesize full finalAnswer
+        firstAudioBuffer = await this.synthesizeSpeech(finalAnswer, callerIsHindi);
+        if (firstAudioBuffer && firstAudioBuffer.length > 0) {
+          const playbackSuccess = await this.playbackSarvamAudio(callControlId, firstAudioBuffer);
+          if (!playbackSuccess) {
+            this.logger.warn(
+              `playbackSarvamAudio dispatch failed for call ${callControlId}, falling back to speakText.`,
+            );
+            await this.speakText(callControlId, {
+              payload: finalAnswer,
+              language: callerIsHindi ? 'hi-IN' : 'en-US',
+            });
+          }
+        } else {
+          // Emergency fallback only if both Smallest and Sarvam TTS synthesis completely failed
+          this.logger.warn(`No TTS audio buffer generated for call ${callControlId}, falling back to speakText.`);
+          await this.speakText(callControlId, {
+            payload: finalAnswer,
+            language: callerIsHindi ? 'hi-IN' : 'en-US',
+          });
+        }
+      } else {
+        // Sentences were emitted but TTS failed for all of them -> fallback to Telnyx speakText
+        this.logger.warn(`TTS synthesis failed during streaming for call ${callControlId}, falling back to speakText.`);
         await this.speakText(callControlId, {
           payload: finalAnswer,
           language: callerIsHindi ? 'hi-IN' : 'en-US',
         });
       }
-    } else {
-      // Emergency fallback only if both Smallest and Sarvam TTS synthesis completely failed
-      this.logger.warn(`No TTS audio buffer generated for call ${callControlId}, falling back to speakText.`);
-      await this.speakText(callControlId, {
-        payload: finalAnswer,
-        language: callerIsHindi ? 'hi-IN' : 'en-US',
-      });
     }
 
     return {
-      responseAudio: audioBuffer,
+      responseAudio: firstAudioBuffer,
       responseText: finalAnswer,
       source: ragResponse.source,
       hangup: false,

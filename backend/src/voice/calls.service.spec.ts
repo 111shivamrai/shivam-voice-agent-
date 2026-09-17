@@ -291,6 +291,20 @@ describe('CallsService', () => {
               source: 'document',
               chunksUsed: 2,
             }),
+            preloadClientDocuments: jest.fn().mockResolvedValue(undefined),
+            generateResponseStream: jest.fn().mockImplementation(
+              async (dto: any, onSentence?: (sentence: string) => Promise<void>) => {
+                const answer = 'We are open Monday to Friday from 9 AM to 6 PM.';
+                if (onSentence) {
+                  await onSentence(answer);
+                }
+                return {
+                  answer,
+                  source: 'document',
+                  chunksUsed: 2,
+                };
+              },
+            ),
           },
         },
       ],
