@@ -121,10 +121,14 @@ export class DeepgramService {
 
     try {
       // 3. Enforce 8-second request timeout via Promise.race
-      const transcribePromise = this.client.listen.prerecorded.transcribeFile(
-        audioBuffer,
-        options,
-      );
+      const transcribePromise = this.client.listen.prerecorded
+        .transcribeFile(audioBuffer, options)
+        .catch((err: unknown) => {
+          return {
+            result: null,
+            error: err instanceof Error ? err : new Error(String(err)),
+          };
+        });
 
       let timeoutTimer: NodeJS.Timeout | undefined;
       const timeoutPromise = new Promise<{ result: null; error: Error }>((_, reject) => {
