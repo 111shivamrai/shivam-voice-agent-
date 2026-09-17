@@ -159,17 +159,21 @@ describe('SmallestService', () => {
       expect(service.selectVoice(undefined)).toBe('anika');
     });
 
-    it('10. should select raj for Hindi and Hinglish', () => {
-      expect(service.selectVoice('Hindi')).toBe('raj');
-      expect(service.selectVoice('hi-IN')).toBe('raj');
-      expect(service.selectVoice('Hinglish')).toBe('raj');
+    it('10. should select radhika for Hindi and Hinglish by default', () => {
+      expect(service.selectVoice('Hindi')).toBe('radhika');
+      expect(service.selectVoice('hi-IN')).toBe('radhika');
+      expect(service.selectVoice('Hinglish')).toBe('radhika');
     });
 
-    it('11. should accept explicitly supported voice parameters', () => {
+    it('11. should accept explicitly supported voice parameters and aliases', () => {
       expect(service.selectVoice('English', 'arjun')).toBe('arjun');
-      expect(service.selectVoice('English', 'pooja')).toBe('pooja');
-      expect(service.selectVoice('English', 'emily')).toBe('emily');
-      expect(service.selectVoice('Hindi', 'raman')).toBe('raman');
+      expect(service.selectVoice('Hindi', 'radhika')).toBe('radhika');
+      expect(service.selectVoice('Hindi', 'vikram')).toBe('vikram');
+      expect(service.selectVoice('English', 'alice')).toBe('alice');
+      // Aliases
+      expect(service.selectVoice('Hindi', 'raj')).toBe('vikram');
+      expect(service.selectVoice('Hindi', 'pooja')).toBe('sakshi');
+      expect(service.selectVoice('English', 'emily')).toBe('anika');
     });
 
     it('12. should map language to hi or en', () => {
@@ -190,7 +194,7 @@ describe('SmallestService', () => {
       const result = await service.textToSpeech('Hello, how can I help you today?', 'English');
 
       expect(global.fetch).toHaveBeenCalledWith(
-        'https://waves-api.smallest.ai/api/v1/lightning/get_speech',
+        'https://waves-api.smallest.ai/api/v1/lightning-v3.1/get_speech',
         expect.objectContaining({
           method: 'POST',
           headers: expect.objectContaining({
@@ -202,7 +206,7 @@ describe('SmallestService', () => {
             voice_id: 'anika',
             sample_rate: 8000,
             speed: 1.0,
-            add_wav_header: true,
+            output_format: 'wav',
           }),
         }),
       );
@@ -214,23 +218,23 @@ describe('SmallestService', () => {
       expect(result.languageCode).toBe('en');
     });
 
-    it('14. should synthesize Hindi speech with raj voice', async () => {
+    it('14. should synthesize Hindi speech with radhika voice', async () => {
       const result = await service.textToSpeech('नमस्ते, मैं आपकी क्या सहायता कर सकता हूँ?', 'Hindi');
 
       expect(global.fetch).toHaveBeenCalledWith(
-        'https://waves-api.smallest.ai/api/v1/lightning/get_speech',
+        'https://waves-api.smallest.ai/api/v1/lightning-v3.1/get_speech',
         expect.objectContaining({
           body: JSON.stringify({
             text: 'नमस्ते, मैं आपकी क्या सहायता कर सकता हूँ?',
-            voice_id: 'raj',
+            voice_id: 'radhika',
             sample_rate: 8000,
             speed: 1.0,
-            add_wav_header: true,
+            output_format: 'wav',
           }),
         }),
       );
 
-      expect(result.voiceId).toBe('raj');
+      expect(result.voiceId).toBe('radhika');
       expect(result.languageCode).toBe('hi');
     });
 
@@ -327,7 +331,7 @@ describe('SmallestService', () => {
       ]);
 
       expect(res1.voiceId).toBe('anika');
-      expect(res2.voiceId).toBe('raj');
+      expect(res2.voiceId).toBe('radhika');
       expect(global.fetch).toHaveBeenCalledTimes(2);
     });
   });

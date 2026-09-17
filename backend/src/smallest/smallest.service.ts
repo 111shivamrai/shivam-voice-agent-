@@ -19,18 +19,21 @@ export interface SmallestTtsResult {
 
 export type SmallestSupportedVoice =
   | 'anika'
+  | 'radhika'
   | 'arjun'
-  | 'pooja'
-  | 'raj'
-  | 'emily'
-  | 'raman';
+  | 'vikram'
+  | 'dhruv'
+  | 'kartik'
+  | 'naina'
+  | 'sakshi'
+  | 'alice';
 
 @Injectable()
 export class SmallestService {
   private readonly logger = new Logger(SmallestService.name);
 
-  // Smallest.ai Lightning V3 configuration
-  private readonly baseUrl = 'https://waves-api.smallest.ai/api/v1/lightning/get_speech';
+  // Smallest.ai Lightning V3.1 configuration
+  private readonly baseUrl = 'https://waves-api.smallest.ai/api/v1/lightning-v3.1/get_speech';
   private readonly defaultTimeoutMs = 5000; // 5 seconds bounded timeout for fast voice responses
   private readonly maxTextLength = 500; // 500 characters max input length
 
@@ -116,21 +119,27 @@ export class SmallestService {
 
   /**
    * Deterministically selects voice ID based on language and optional voice parameter.
+   * Includes graceful aliasing for legacy voice names.
    */
   public selectVoice(language?: string, voice?: string): SmallestSupportedVoice {
     if (voice) {
       const v = voice.toLowerCase().trim();
-      if (['anika', 'arjun', 'pooja', 'raj', 'emily', 'raman'].includes(v)) {
+      // Direct supported catalog match
+      if (['anika', 'radhika', 'arjun', 'vikram', 'dhruv', 'kartik', 'naina', 'sakshi', 'alice'].includes(v)) {
         return v as SmallestSupportedVoice;
       }
+      // Graceful legacy/alias mappings
+      if (v === 'raj' || v === 'raman') return 'vikram';
+      if (v === 'pooja') return 'sakshi';
+      if (v === 'emily') return 'anika';
     }
 
     const lang = (language ?? '').toLowerCase().trim();
     if (lang.includes('hindi') || lang.includes('hi') || lang.includes('hinglish')) {
-      return 'raj'; // Verified Lightning V3 Hindi/Hinglish voice
+      return 'radhika'; // Verified Lightning V3.1 Hindi/Hinglish voice
     }
 
-    return 'anika'; // Verified Lightning V3 English voice
+    return 'anika'; // Verified Lightning V3.1 English voice
   }
 
   /**
@@ -179,7 +188,7 @@ export class SmallestService {
     const languageCode = this.mapLanguage(language);
 
     this.logger.log(
-      `Sending TTS request to Smallest.ai Lightning V3 (${cleanedText.length} chars, voice: ${voiceId}, lang: ${languageCode}, sampleRate: 8000Hz)`,
+      `Sending TTS request to Smallest.ai Lightning V3.1 (${cleanedText.length} chars, voice: ${voiceId}, lang: ${languageCode}, sampleRate: 8000Hz)`,
     );
 
     const payload = {
@@ -187,7 +196,7 @@ export class SmallestService {
       voice_id: voiceId,
       sample_rate: 8000,
       speed: 1.0,
-      add_wav_header: true,
+      output_format: 'wav',
     };
 
     const controller = new AbortController();
