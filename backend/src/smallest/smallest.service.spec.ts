@@ -194,7 +194,7 @@ describe('SmallestService', () => {
       const result = await service.textToSpeech('Hello, how can I help you today?', 'English');
 
       expect(global.fetch).toHaveBeenCalledWith(
-        'https://waves-api.smallest.ai/api/v1/lightning-v3.1/get_speech',
+        'https://api.smallest.ai/waves/v1/tts',
         expect.objectContaining({
           method: 'POST',
           headers: expect.objectContaining({
@@ -204,6 +204,7 @@ describe('SmallestService', () => {
           body: JSON.stringify({
             text: 'Hello, how can I help you today?',
             voice_id: 'anika',
+            model: 'lightning_v3.1',
             sample_rate: 8000,
             speed: 1.0,
             output_format: 'wav',
@@ -222,11 +223,12 @@ describe('SmallestService', () => {
       const result = await service.textToSpeech('नमस्ते, मैं आपकी क्या सहायता कर सकता हूँ?', 'Hindi');
 
       expect(global.fetch).toHaveBeenCalledWith(
-        'https://waves-api.smallest.ai/api/v1/lightning-v3.1/get_speech',
+        'https://api.smallest.ai/waves/v1/tts',
         expect.objectContaining({
           body: JSON.stringify({
             text: 'नमस्ते, मैं आपकी क्या सहायता कर सकता हूँ?',
             voice_id: 'radhika',
+            model: 'lightning_v3.1',
             sample_rate: 8000,
             speed: 1.0,
             output_format: 'wav',

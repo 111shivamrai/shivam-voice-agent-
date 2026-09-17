@@ -32,8 +32,9 @@ export type SmallestSupportedVoice =
 export class SmallestService {
   private readonly logger = new Logger(SmallestService.name);
 
-  // Smallest.ai Lightning V3.1 configuration
-  private readonly baseUrl = 'https://waves-api.smallest.ai/api/v1/lightning-v3.1/get_speech';
+  // Smallest.ai Waves Canonical Unified TTS configuration
+  private readonly baseUrl = 'https://api.smallest.ai/waves/v1/tts';
+  private readonly defaultModel = 'lightning_v3.1';
   private readonly defaultTimeoutMs = 5000; // 5 seconds bounded timeout for fast voice responses
   private readonly maxTextLength = 500; // 500 characters max input length
 
@@ -188,12 +189,13 @@ export class SmallestService {
     const languageCode = this.mapLanguage(language);
 
     this.logger.log(
-      `Sending TTS request to Smallest.ai Lightning V3.1 (${cleanedText.length} chars, voice: ${voiceId}, lang: ${languageCode}, sampleRate: 8000Hz)`,
+      `Sending TTS request to Smallest.ai (${this.defaultModel}, ${cleanedText.length} chars, voice: ${voiceId}, lang: ${languageCode}, sampleRate: 8000Hz)`,
     );
 
     const payload = {
       text: cleanedText,
       voice_id: voiceId,
+      model: this.defaultModel,
       sample_rate: 8000,
       speed: 1.0,
       output_format: 'wav',
