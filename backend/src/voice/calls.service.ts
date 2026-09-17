@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto';
 import { SupabaseService } from '../supabase/supabase.service.js';
 import { SarvamService } from '../sarvam/sarvam.service.js';
 import { DeepgramService } from '../deepgram/deepgram.service.js';
+import { SmallestService } from '../smallest/smallest.service.js';
 import { TwilioService } from '../twilio/twilio.service.js';
 import { VoiceSessionService } from './voice-session.service.js';
 import { ConversationService } from './conversation.service.js';
@@ -66,7 +67,7 @@ export class CallsService {
   // Active call hard deadline supervisor timers
   private readonly activeCallTimers = new Map<string, NodeJS.Timeout>();
 
-  // Transient audio cache for streaming Sarvam Bulbul v3 WAV audio
+  // Transient audio cache for streaming synthesized WAV audio
   private readonly transientAudioMap = new Map<string, TransientAudioEntry>();
   private readonly audioTtlMs = 60 * 1000; // 60 seconds
 
@@ -79,6 +80,7 @@ export class CallsService {
     private readonly supabaseService: SupabaseService,
     private readonly sarvamService: SarvamService,
     private readonly deepgramService: DeepgramService,
+    private readonly smallestService: SmallestService,
     private readonly twilioService: TwilioService,
     private readonly voiceSessionService: VoiceSessionService,
     private readonly conversationService: ConversationService,
@@ -360,6 +362,45 @@ export class CallsService {
 
     this.logger.log(`Playing Sarvam Bulbul v3 audio (${audioBuffer.length} bytes) to call ${callControlId} via ${audioUrl}`);
     return this.playbackAudio(callControlId, audioUrl);
+  }
+
+  /**
+   * Synthesizes speech using Smallest.ai Lightning V3 as primary TTS,
+   * with automatic fallback to Sarvam Bulbul v3 TTS, and safe error handling.
+   */
+  public async synthesizeSpeech(
+    text: string,
+    isHindi: boolean,
+  ): Promise<Buffer | undefined> {
+    // 1. Primary: Smallest.ai Lightning V3 TTS
+    try {
+      const smallestResult = await this.smallestService.textToSpeech(
+        text,
+        isHindi ? 'hi' : 'en',
+      );
+      if (smallestResult && smallestResult.audioBuffer && smallestResult.audioBuffer.length > 0) {
+        return smallestResult.audioBuffer;
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`Smallest.ai TTS failed, falling back to Sarvam Bulbul v3 TTS: ${msg}`);
+    }
+
+    // 2. Fallback: Sarvam Bulbul v3 TTS
+    try {
+      const sarvamResult = await this.sarvamService.textToSpeech(
+        text,
+        isHindi ? 'hi-IN' : 'en-IN',
+      );
+      if (sarvamResult && sarvamResult.audioBuffer && sarvamResult.audioBuffer.length > 0) {
+        return sarvamResult.audioBuffer;
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`Sarvam TTS fallback also failed: ${msg}`);
+    }
+
+    return undefined;
   }
 
   private cleanExpiredTransientAudio(): void {
@@ -729,17 +770,8 @@ export class CallsService {
 
     activeCall.transcript.push(transcriptItem);
 
-    // Primary: Synthesize greeting via Sarvam Bulbul v3 TTS
-    let greetingAudio: Buffer | undefined;
-    try {
-      const ttsResult = await this.sarvamService.textToSpeech(
-        greeting,
-        isHindi ? 'hi-IN' : 'en-IN',
-      );
-      greetingAudio = ttsResult.audioBuffer;
-    } catch (err: unknown) {
-      this.logger.warn(`Sarvam TTS greeting synthesis failed, fallback to speakText: ${err}`);
-    }
+    // Synthesize greeting via Smallest.ai Lightning V3 (Primary) with Sarvam fallback
+    const greetingAudio = await this.synthesizeSpeech(greeting, isHindi);
 
     if (greetingAudio && greetingAudio.length > 0) {
       const played = await this.playbackSarvamAudio(callControlId, greetingAudio);
@@ -750,7 +782,7 @@ export class CallsService {
         });
       }
     } else {
-      // Fallback only if Sarvam TTS synthesis failed
+      // Fallback only if both Smallest and Sarvam TTS synthesis failed
       await this.speakText(callControlId, {
         payload: greeting,
         language: isHindi ? 'hi-IN' : 'en-US',
@@ -898,10 +930,10 @@ export class CallsService {
       const isHindi = activeCall.language.includes('hindi');
       const limitMsg = isHindi ? CALL_MESSAGES.TIME_LIMIT_HI : CALL_MESSAGES.TIME_LIMIT_EN;
 
-      try {
-        const tts = await this.sarvamService.textToSpeech(limitMsg, isHindi ? 'hi-IN' : 'en-IN');
-        await this.playbackSarvamAudio(callControlId, tts.audioBuffer);
-      } catch {
+      const limitAudio = await this.synthesizeSpeech(limitMsg, isHindi);
+      if (limitAudio && limitAudio.length > 0) {
+        await this.playbackSarvamAudio(callControlId, limitAudio);
+      } else {
         await this.speakText(callControlId, { payload: limitMsg, language: isHindi ? 'hi-IN' : 'en-US' });
       }
       await this.hangupCall(callControlId);
@@ -941,10 +973,10 @@ export class CallsService {
         this.logger.warn(`Call ${callControlId} reached 5 consecutive empty STT triggers. Terminating call.`);
         const goodbyeMsg = isHindi ? CALL_MESSAGES.GOODBYE_HI : CALL_MESSAGES.GOODBYE_EN;
 
-        try {
-          const tts = await this.sarvamService.textToSpeech(goodbyeMsg, isHindi ? 'hi-IN' : 'en-IN');
-          await this.playbackSarvamAudio(callControlId, tts.audioBuffer);
-        } catch {
+        const goodbyeAudio = await this.synthesizeSpeech(goodbyeMsg, isHindi);
+        if (goodbyeAudio && goodbyeAudio.length > 0) {
+          await this.playbackSarvamAudio(callControlId, goodbyeAudio);
+        } else {
           await this.speakText(callControlId, { payload: goodbyeMsg, language: isHindi ? 'hi-IN' : 'en-US' });
         }
         await this.hangupCall(callControlId);
@@ -960,10 +992,10 @@ export class CallsService {
       if (emptyCount >= EMPTY_STT_PROMPT_THRESHOLD) {
         // Prompt caller after 3 consecutive empty frames
         const promptMsg = isHindi ? CALL_MESSAGES.STILL_THERE_HI : CALL_MESSAGES.STILL_THERE_EN;
-        try {
-          const tts = await this.sarvamService.textToSpeech(promptMsg, isHindi ? 'hi-IN' : 'en-IN');
-          await this.playbackSarvamAudio(callControlId, tts.audioBuffer);
-        } catch {
+        const promptAudio = await this.synthesizeSpeech(promptMsg, isHindi);
+        if (promptAudio && promptAudio.length > 0) {
+          await this.playbackSarvamAudio(callControlId, promptAudio);
+        } else {
           await this.speakText(callControlId, { payload: promptMsg, language: isHindi ? 'hi-IN' : 'en-US' });
         }
 
@@ -1016,10 +1048,10 @@ export class CallsService {
         source: 'system',
       });
 
-      try {
-        const tts = await this.sarvamService.textToSpeech(maxTurnMsg, callerIsHindi ? 'hi-IN' : 'en-IN');
-        await this.playbackSarvamAudio(callControlId, tts.audioBuffer);
-      } catch {
+      const maxTurnAudio = await this.synthesizeSpeech(maxTurnMsg, callerIsHindi);
+      if (maxTurnAudio && maxTurnAudio.length > 0) {
+        await this.playbackSarvamAudio(callControlId, maxTurnAudio);
+      } else {
         await this.speakText(callControlId, { payload: maxTurnMsg, language: callerIsHindi ? 'hi-IN' : 'en-US' });
       }
       await this.hangupCall(callControlId);
@@ -1063,19 +1095,10 @@ export class CallsService {
       source: ragResponse.source,
     });
 
-    // 8. Synthesize Audio via Sarvam Bulbul v3 TTS
-    let audioBuffer: Buffer | undefined;
-    try {
-      const ttsResult = await this.sarvamService.textToSpeech(
-        finalAnswer,
-        callerIsHindi ? 'hi-IN' : 'en-IN',
-      );
-      audioBuffer = ttsResult.audioBuffer;
-    } catch (err: unknown) {
-      this.logger.warn(`Sarvam TTS synthesis failed: ${err}`);
-    }
+    // 8. Synthesize Audio via Smallest.ai Lightning V3 (Primary) with Sarvam Bulbul v3 (Fallback)
+    const audioBuffer = await this.synthesizeSpeech(finalAnswer, callerIsHindi);
 
-    // 9. Deliver Sarvam Bulbul v3 Generated Audio to Caller
+    // 9. Deliver Generated Audio to Caller
     if (audioBuffer && audioBuffer.length > 0) {
       const playbackSuccess = await this.playbackSarvamAudio(callControlId, audioBuffer);
       if (!playbackSuccess) {
@@ -1088,8 +1111,8 @@ export class CallsService {
         });
       }
     } else {
-      // Emergency fallback only if Sarvam TTS synthesis completely failed
-      this.logger.warn(`No Sarvam audio buffer generated for call ${callControlId}, falling back to speakText.`);
+      // Emergency fallback only if both Smallest and Sarvam TTS synthesis completely failed
+      this.logger.warn(`No TTS audio buffer generated for call ${callControlId}, falling back to speakText.`);
       await this.speakText(callControlId, {
         payload: finalAnswer,
         language: callerIsHindi ? 'hi-IN' : 'en-US',

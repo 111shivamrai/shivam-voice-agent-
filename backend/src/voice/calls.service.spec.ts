@@ -4,6 +4,7 @@ import { CallsService } from './calls.service.js';
 import { SupabaseService } from '../supabase/supabase.service.js';
 import { SarvamService } from '../sarvam/sarvam.service.js';
 import { DeepgramService } from '../deepgram/deepgram.service.js';
+import { SmallestService } from '../smallest/smallest.service.js';
 import { VoiceSessionService } from './voice-session.service.js';
 import { ConversationService } from './conversation.service.js';
 import { TwilioService } from '../twilio/twilio.service.js';
@@ -26,6 +27,7 @@ describe('CallsService', () => {
   let _supabaseService: SupabaseService;
   let sarvamService: SarvamService;
   let deepgramService: DeepgramService;
+  let smallestService: SmallestService;
   let voiceSessionService: VoiceSessionService;
   let _conversationService: ConversationService;
   let twilioService: TwilioService;
@@ -267,6 +269,21 @@ describe('CallsService', () => {
           },
         },
         {
+          provide: SmallestService,
+          useValue: {
+            textToSpeech: jest.fn().mockResolvedValue({
+              audioBuffer: Buffer.from('mock-audio-data'),
+              audioBase64: 'bW9jay1hdWRpby1kYXRh',
+              sampleRate: 8000,
+              languageCode: 'en',
+              voiceId: 'anika',
+            }),
+            preprocessText: jest.fn().mockImplementation((t: string) => t),
+            selectVoice: jest.fn().mockReturnValue('anika'),
+            mapLanguage: jest.fn().mockReturnValue('en'),
+          },
+        },
+        {
           provide: ConversationService,
           useValue: {
             generateResponse: jest.fn().mockResolvedValue({
@@ -284,6 +301,7 @@ describe('CallsService', () => {
     _supabaseService = module.get<SupabaseService>(SupabaseService);
     sarvamService = module.get<SarvamService>(SarvamService);
     deepgramService = module.get<DeepgramService>(DeepgramService);
+    smallestService = module.get<SmallestService>(SmallestService);
     voiceSessionService = module.get<VoiceSessionService>(VoiceSessionService);
     _conversationService = module.get<ConversationService>(ConversationService);
     twilioService = module.get<TwilioService>(TwilioService);
@@ -512,7 +530,7 @@ describe('CallsService', () => {
   // 5. Call Answered Event
   // ====================================================================
   describe('Call Answered Event', () => {
-    it('19. should synthesize English greeting via Sarvam TTS, playback audio, and record in transcript', async () => {
+    it('19. should synthesize English greeting via Smallest.ai TTS, playback audio, and record in transcript', async () => {
       const playbackSpy = jest.spyOn(service, 'playbackAudio');
       const speakSpy = jest.spyOn(service, 'speakText');
 
@@ -524,9 +542,9 @@ describe('CallsService', () => {
 
       await service.handleCallAnswered({ call_control_id: mockCallControlId });
 
-      expect(sarvamService.textToSpeech).toHaveBeenCalledWith(
+      expect(smallestService.textToSpeech).toHaveBeenCalledWith(
         CALL_MESSAGES.GREETING_EN,
-        'en-IN',
+        'en',
       );
       expect(playbackSpy).toHaveBeenCalledWith(
         mockCallControlId,
@@ -539,7 +557,7 @@ describe('CallsService', () => {
       expect(active?.transcript[0].source).toBe('greeting');
     });
 
-    it('20. should speak Hindi greeting via Sarvam TTS if client agent language is Hindi', async () => {
+    it('20. should speak Hindi greeting via Smallest.ai TTS if client agent language is Hindi', async () => {
       mockProfilesDb[mockClientId].agent_language = 'Hindi';
       const playbackSpy = jest.spyOn(service, 'playbackAudio');
 
@@ -551,9 +569,9 @@ describe('CallsService', () => {
 
       await service.handleCallAnswered({ call_control_id: mockCallControlId });
 
-      expect(sarvamService.textToSpeech).toHaveBeenCalledWith(
+      expect(smallestService.textToSpeech).toHaveBeenCalledWith(
         CALL_MESSAGES.GREETING_HI,
-        'hi-IN',
+        'hi',
       );
       expect(playbackSpy).toHaveBeenCalledWith(
         mockCallControlId,
@@ -768,7 +786,7 @@ describe('CallsService', () => {
       expect(res2.responseText).not.toContain(CALL_MESSAGES.WARNING_3MIN_EN);
     });
 
-    it('36. should synthesize audio via Sarvam Bulbul v3 TTS and deliver to Telnyx via playback_start', async () => {
+    it('36. should synthesize audio via Smallest.ai Lightning V3 TTS and deliver to Telnyx via playback_start', async () => {
       const playbackSpy = jest.spyOn(service, 'playbackAudio');
       const speakSpy = jest.spyOn(service, 'speakText');
 
@@ -776,14 +794,14 @@ describe('CallsService', () => {
         transcript: 'When are you open?',
       });
 
-      // 1. Sarvam TTS must be called
-      expect(sarvamService.textToSpeech).toHaveBeenCalledWith(
+      // 1. Smallest.ai TTS must be called
+      expect(smallestService.textToSpeech).toHaveBeenCalledWith(
         expect.stringContaining('open Monday to Friday'),
-        'en-IN',
+        'en',
       );
       expect(res.responseAudio).toBeDefined();
 
-      // 2. Playback of generated Sarvam audio URL must be triggered via Telnyx playback_start
+      // 2. Playback of generated audio URL must be triggered via Telnyx playback_start
       expect(playbackSpy).toHaveBeenCalledWith(
         mockCallControlId,
         expect.stringMatching(/\/voice\/audio\/[0-9a-f-]+\.wav$/),
@@ -804,13 +822,39 @@ describe('CallsService', () => {
       expect(active.transcript.some((t) => t.role === 'assistant')).toBe(true);
     });
 
-    it('37. should fallback to Telnyx speakText ONLY if Sarvam TTS synthesis fails', async () => {
-      (sarvamService.textToSpeech as jest.Mock).mockRejectedValueOnce(new Error('TTS down'));
+    it('37. should fallback to Sarvam Bulbul v3 TTS if Smallest.ai TTS synthesis fails', async () => {
+      (smallestService.textToSpeech as jest.Mock).mockRejectedValueOnce(
+        new Error('Smallest.ai service unavailable'),
+      );
+      const playbackSpy = jest.spyOn(service, 'playbackAudio');
+      const speakSpy = jest.spyOn(service, 'speakText');
+
+      const res = await service.processCallerUtterance(mockCallControlId, {
+        transcript: 'Test fallback to Sarvam TTS',
+      });
+
+      // Sarvam TTS fallback must be called
+      expect(sarvamService.textToSpeech).toHaveBeenCalledWith(
+        expect.any(String),
+        'en-IN',
+      );
+      expect(playbackSpy).toHaveBeenCalled();
+      expect(speakSpy).not.toHaveBeenCalled();
+      expect(res.responseAudio).toBeDefined();
+    });
+
+    it('37a. should fallback to Telnyx speakText ONLY if both Smallest and Sarvam TTS fail', async () => {
+      (smallestService.textToSpeech as jest.Mock).mockRejectedValueOnce(
+        new Error('Smallest down'),
+      );
+      (sarvamService.textToSpeech as jest.Mock).mockRejectedValueOnce(
+        new Error('Sarvam down'),
+      );
       const speakSpy = jest.spyOn(service, 'speakText');
       const playbackSpy = jest.spyOn(service, 'playbackAudio');
 
       const res = await service.processCallerUtterance(mockCallControlId, {
-        transcript: 'Test fallback TTS',
+        transcript: 'Test total TTS fallback',
       });
 
       expect(playbackSpy).not.toHaveBeenCalled();

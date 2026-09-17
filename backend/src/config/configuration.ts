@@ -5,6 +5,7 @@ export interface AppConfig {
   openaiApiKey: string;
   sarvamApiKey: string;
   deepgramApiKey: string;
+  smallestApiKey?: string;
   adminPassword: string;
   twilioAccountSid: string;
   twilioAuthToken: string;
@@ -25,6 +26,9 @@ export interface AppConfig {
   };
   deepgram: {
     apiKey: string;
+  };
+  smallest?: {
+    apiKey?: string;
   };
   twilio: {
     accountSid: string;
@@ -77,6 +81,7 @@ export const configuration = (): AppConfig => {
   const openaiApiKey = process.env.OPENAI_API_KEY!;
   const sarvamApiKey = process.env.SARVAM_API_KEY!;
   const deepgramApiKey = process.env.DEEPGRAM_API_KEY!;
+  const smallestApiKey = process.env.SMALLEST_API_KEY;
   const twilioAccountSid = process.env.TWILIO_ACCOUNT_SID!;
   const twilioAuthToken = process.env.TWILIO_AUTH_TOKEN!;
   const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER!;
@@ -92,6 +97,7 @@ export const configuration = (): AppConfig => {
     openaiApiKey,
     sarvamApiKey,
     deepgramApiKey,
+    smallestApiKey,
     twilioAccountSid,
     twilioAuthToken,
     twilioPhoneNumber,
@@ -106,6 +112,7 @@ export const configuration = (): AppConfig => {
     OPENAI_API_KEY: openaiApiKey,
     SARVAM_API_KEY: sarvamApiKey,
     DEEPGRAM_API_KEY: deepgramApiKey,
+    SMALLEST_API_KEY: smallestApiKey,
     TWILIO_ACCOUNT_SID: twilioAccountSid,
     TWILIO_AUTH_TOKEN: twilioAuthToken,
     TWILIO_PHONE_NUMBER: twilioPhoneNumber,
@@ -129,6 +136,9 @@ export const configuration = (): AppConfig => {
     },
     deepgram: {
       apiKey: deepgramApiKey,
+    },
+    smallest: {
+      apiKey: smallestApiKey,
     },
     twilio: {
       accountSid: twilioAccountSid,

@@ -8,6 +8,7 @@ import { DocumentsModule } from './documents/documents.module';
 import { PaymentsModule } from './payments/payments.module.js';
 import { SarvamModule } from './sarvam/sarvam.module.js';
 import { DeepgramModule } from './deepgram/deepgram.module.js';
+import { SmallestModule } from './smallest/smallest.module.js';
 import { VoiceSessionModule } from './voice/voice-session.module.js';
 import { ConversationModule } from './voice/conversation.module.js';
 import { VoiceModule } from './voice/voice.module.js';
@@ -25,6 +26,7 @@ import { TwilioModule } from './twilio/twilio.module.js';
     PaymentsModule,
     SarvamModule,
     DeepgramModule,
+    SmallestModule,
     TwilioModule,
     VoiceSessionModule,
     ConversationModule,
