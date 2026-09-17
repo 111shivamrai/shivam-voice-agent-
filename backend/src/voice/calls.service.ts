@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
 import { SupabaseService } from '../supabase/supabase.service.js';
 import { SarvamService } from '../sarvam/sarvam.service.js';
+import { DeepgramService } from '../deepgram/deepgram.service.js';
 import { TwilioService } from '../twilio/twilio.service.js';
 import { VoiceSessionService } from './voice-session.service.js';
 import { ConversationService } from './conversation.service.js';
@@ -77,6 +78,7 @@ export class CallsService {
     private readonly configService: ConfigService,
     private readonly supabaseService: SupabaseService,
     private readonly sarvamService: SarvamService,
+    private readonly deepgramService: DeepgramService,
     private readonly twilioService: TwilioService,
     private readonly voiceSessionService: VoiceSessionService,
     private readonly conversationService: ConversationService,
@@ -912,13 +914,16 @@ export class CallsService {
       };
     }
 
-    // 2. Transcribe Audio via Sarvam Saaras v3 STT if buffer provided
+    // 2. Transcribe Audio via Deepgram Nova-3 STT if buffer provided
     let transcriptText = input.transcript ?? '';
     if (!transcriptText && input.audioBuffer && input.audioBuffer.length > 0) {
       try {
-        transcriptText = await this.sarvamService.speechToText(input.audioBuffer);
+        transcriptText = await this.deepgramService.transcribeAudio(
+          input.audioBuffer,
+          activeCall.language,
+        );
       } catch (err: unknown) {
-        this.logger.warn(`STT transcription failure for call ${callControlId}: ${err}`);
+        this.logger.warn(`Deepgram STT transcription failure for call ${callControlId}: ${err}`);
       }
     }
 
@@ -989,7 +994,7 @@ export class CallsService {
     // 4. Dynamic Language Detection from Caller Input
     let detectedLang = 'english';
     try {
-      detectedLang = await this.sarvamService.detectLanguage(transcriptText);
+      detectedLang = this.deepgramService.detectLanguage(transcriptText).toLowerCase();
       activeCall.language = detectedLang;
       this.voiceSessionService.updateSession(callControlId, { language: detectedLang as any });
     } catch {

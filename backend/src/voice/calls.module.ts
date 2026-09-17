@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { SupabaseModule } from '../supabase/supabase.module.js';
 import { SarvamModule } from '../sarvam/sarvam.module.js';
+import { DeepgramModule } from '../deepgram/deepgram.module.js';
 import { VoiceSessionModule } from './voice-session.module.js';
 import { ConversationModule } from './conversation.module.js';
 import { CallsService } from './calls.service.js';
@@ -13,6 +14,7 @@ import { TwilioModule } from '../twilio/twilio.module.js';
   imports: [
     SupabaseModule,
     SarvamModule,
+    DeepgramModule,
     TwilioModule,
     VoiceSessionModule,
     ConversationModule,

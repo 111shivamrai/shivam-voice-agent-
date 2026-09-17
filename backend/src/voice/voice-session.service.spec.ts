@@ -397,27 +397,25 @@ describe('VoiceSessionService', () => {
       service.createSession({ sessionId: 'sess-stale-2', clientId: 'client-2' });
       service.createSession({ sessionId: 'sess-active', clientId: 'client-3' });
 
-      // Simulate age by testing with a custom 50ms threshold
-      // Keep sess-active fresh by updating its activity
-      const customThresholdMs = 50;
+      // Simulate age deterministically
+      const customThresholdMs = 5000;
+      const now = Date.now();
+      const internalMap = (service as any).sessions as Map<string, any>;
+      const s1 = internalMap.get('sess-stale-1');
+      const s2 = internalMap.get('sess-stale-2');
+      const sActive = internalMap.get('sess-active');
 
-      return new Promise<void>((resolve) => {
-        setTimeout(() => {
-          service.updateActivity('sess-active');
+      if (s1) s1.lastActivityAt = new Date(now - 10000);
+      if (s2) s2.lastActivityAt = new Date(now - 10000);
+      if (sActive) sActive.lastActivityAt = new Date(now);
 
-          setTimeout(() => {
-            // sess-stale-1 and sess-stale-2 are > 50ms old, sess-active was refreshed
-            const removed = service.cleanupStaleSessions(customThresholdMs);
+      const removed = service.cleanupStaleSessions(customThresholdMs);
 
-            expect(removed).toBe(2);
-            expect(service.hasSession('sess-stale-1')).toBe(false);
-            expect(service.hasSession('sess-stale-2')).toBe(false);
-            expect(service.hasSession('sess-active')).toBe(true);
-            expect(service.getActiveSessionCount()).toBe(1);
-            resolve();
-          }, 40);
-        }, 30);
-      });
+      expect(removed).toBe(2);
+      expect(service.hasSession('sess-stale-1')).toBe(false);
+      expect(service.hasSession('sess-stale-2')).toBe(false);
+      expect(service.hasSession('sess-active')).toBe(true);
+      expect(service.getActiveSessionCount()).toBe(1);
     });
 
     it('should not crash on empty session map during cleanup', () => {

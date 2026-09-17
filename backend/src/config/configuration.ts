@@ -4,6 +4,7 @@ export interface AppConfig {
   supabaseServiceKey: string;
   openaiApiKey: string;
   sarvamApiKey: string;
+  deepgramApiKey: string;
   adminPassword: string;
   twilioAccountSid: string;
   twilioAuthToken: string;
@@ -20,6 +21,9 @@ export interface AppConfig {
     apiKey: string;
   };
   sarvam: {
+    apiKey: string;
+  };
+  deepgram: {
     apiKey: string;
   };
   twilio: {
@@ -45,6 +49,7 @@ export const configuration = (): AppConfig => {
     'SUPABASE_SERVICE_KEY',
     'OPENAI_API_KEY',
     'SARVAM_API_KEY',
+    'DEEPGRAM_API_KEY',
     'TWILIO_ACCOUNT_SID',
     'TWILIO_AUTH_TOKEN',
     'TWILIO_PHONE_NUMBER',
@@ -71,6 +76,7 @@ export const configuration = (): AppConfig => {
   const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY!;
   const openaiApiKey = process.env.OPENAI_API_KEY!;
   const sarvamApiKey = process.env.SARVAM_API_KEY!;
+  const deepgramApiKey = process.env.DEEPGRAM_API_KEY!;
   const twilioAccountSid = process.env.TWILIO_ACCOUNT_SID!;
   const twilioAuthToken = process.env.TWILIO_AUTH_TOKEN!;
   const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER!;
@@ -85,6 +91,7 @@ export const configuration = (): AppConfig => {
     supabaseServiceKey,
     openaiApiKey,
     sarvamApiKey,
+    deepgramApiKey,
     twilioAccountSid,
     twilioAuthToken,
     twilioPhoneNumber,
@@ -98,6 +105,7 @@ export const configuration = (): AppConfig => {
     SUPABASE_SERVICE_KEY: supabaseServiceKey,
     OPENAI_API_KEY: openaiApiKey,
     SARVAM_API_KEY: sarvamApiKey,
+    DEEPGRAM_API_KEY: deepgramApiKey,
     TWILIO_ACCOUNT_SID: twilioAccountSid,
     TWILIO_AUTH_TOKEN: twilioAuthToken,
     TWILIO_PHONE_NUMBER: twilioPhoneNumber,
@@ -118,6 +126,9 @@ export const configuration = (): AppConfig => {
     },
     sarvam: {
       apiKey: sarvamApiKey,
+    },
+    deepgram: {
+      apiKey: deepgramApiKey,
     },
     twilio: {
       accountSid: twilioAccountSid,

@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { CallsService } from './calls.service.js';
 import { SupabaseService } from '../supabase/supabase.service.js';
 import { SarvamService } from '../sarvam/sarvam.service.js';
+import { DeepgramService } from '../deepgram/deepgram.service.js';
 import { VoiceSessionService } from './voice-session.service.js';
 import { ConversationService } from './conversation.service.js';
 import { TwilioService } from '../twilio/twilio.service.js';
@@ -24,6 +25,7 @@ describe('CallsService', () => {
   let configService: ConfigService;
   let _supabaseService: SupabaseService;
   let sarvamService: SarvamService;
+  let deepgramService: DeepgramService;
   let voiceSessionService: VoiceSessionService;
   let _conversationService: ConversationService;
   let twilioService: TwilioService;
@@ -257,6 +259,14 @@ describe('CallsService', () => {
           },
         },
         {
+          provide: DeepgramService,
+          useValue: {
+            transcribeAudio: jest.fn().mockResolvedValue('What are your opening hours?'),
+            transcribeStream: jest.fn().mockResolvedValue('What are your opening hours?'),
+            detectLanguage: jest.fn().mockReturnValue('English'),
+          },
+        },
+        {
           provide: ConversationService,
           useValue: {
             generateResponse: jest.fn().mockResolvedValue({
@@ -273,6 +283,7 @@ describe('CallsService', () => {
     configService = module.get<ConfigService>(ConfigService);
     _supabaseService = module.get<SupabaseService>(SupabaseService);
     sarvamService = module.get<SarvamService>(SarvamService);
+    deepgramService = module.get<DeepgramService>(DeepgramService);
     voiceSessionService = module.get<VoiceSessionService>(VoiceSessionService);
     _conversationService = module.get<ConversationService>(ConversationService);
     twilioService = module.get<TwilioService>(TwilioService);
@@ -651,13 +662,13 @@ describe('CallsService', () => {
       expect(res.responseText).toBe(CALL_MESSAGES.MAX_DURATION_HI);
     });
 
-    it('28. should transcribe audio buffer via Sarvam STT', async () => {
+    it('28. should transcribe audio buffer via Deepgram STT', async () => {
       const mockAudio = Buffer.from('audio-wave-bytes');
       const res = await service.processCallerUtterance(mockCallControlId, {
         audioBuffer: mockAudio,
       });
 
-      expect(sarvamService.speechToText).toHaveBeenCalledWith(mockAudio);
+      expect(deepgramService.transcribeAudio).toHaveBeenCalledWith(mockAudio, 'english');
       expect(res.hangup).toBe(false);
       expect(res.source).toBe('document');
     });
