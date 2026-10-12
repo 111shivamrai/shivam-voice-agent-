@@ -57,13 +57,16 @@ async function bootstrap() {
     allowedHeaders: ['Content-Type', 'Authorization'],
   });
 
+  // Enable shutdown hooks for graceful termination on SIGTERM/SIGINT
+  app.enableShutdownHooks();
+
   const port =
     configService.get<number>('port') ??
     configService.get<number>('PORT') ??
     3001;
 
-  await app.listen(port);
-  logger.log(`Backend server listening on port ${port}`);
+  await app.listen(port, '0.0.0.0');
+  logger.log(`Backend server listening on port ${port} (0.0.0.0)`);
 }
 
 void bootstrap();

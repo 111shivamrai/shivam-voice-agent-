@@ -318,6 +318,9 @@ export class MediaStreamService {
 
     if (rms >= this.energyThreshold) {
       // Caller is speaking
+      if (!session.isSpeaking) {
+        this.clearAudioBuffer(session.callControlId);
+      }
       session.isSpeaking = true;
       session.speechFrames++;
       session.silenceFrames = 0;
@@ -420,6 +423,7 @@ export class MediaStreamService {
         const mediaMsg = JSON.stringify({
           event: 'media',
           streamSid: streamId,
+          stream_id: streamId,
           media: {
             payload: chunk.toString('base64'),
           },
@@ -431,6 +435,7 @@ export class MediaStreamService {
       const markMsg = JSON.stringify({
         event: 'mark',
         streamSid: streamId,
+        stream_id: streamId,
         mark: {
           name: 'agent-response-complete',
         },
@@ -443,6 +448,35 @@ export class MediaStreamService {
       return true;
     } catch (err: unknown) {
       this.logger.error(`Failed to send audio over WebSocket for call ${callControlId}: ${err}`);
+      return false;
+    }
+  }
+
+  /**
+   * Sends a clear message to carrier WebSocket to immediately flush buffered audio (barge-in interruption).
+   */
+  public clearAudioBuffer(callControlId: string): boolean {
+    const streamId = this.callToStreamMap.get(callControlId);
+    if (!streamId) {
+      return false;
+    }
+
+    const session = this.streamSessions.get(streamId);
+    if (!session || !session.ws || session.ws.readyState !== 1 /* WebSocket.OPEN */) {
+      return false;
+    }
+
+    try {
+      const clearMsg = JSON.stringify({
+        event: 'clear',
+        streamSid: streamId,
+        stream_id: streamId,
+      });
+      session.ws.send(clearMsg);
+      this.logger.log(`Sent clear buffer event to carrier on stream ${streamId} for call ${callControlId}`);
+      return true;
+    } catch (err: unknown) {
+      this.logger.debug?.(`Failed to send clear event for call ${callControlId}: ${err}`);
       return false;
     }
   }

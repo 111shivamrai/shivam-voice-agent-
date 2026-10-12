@@ -529,6 +529,30 @@ describe('CallsService', () => {
       expect(active?.clientId).toBe(mockClientId);
     });
 
+    it('17b. should ignore duplicate call.initiated event for already active call', async () => {
+      const answerSpy = jest.spyOn(service, 'answerCall');
+
+      await service.handleCallInitiated({
+        call_control_id: mockCallControlId,
+        to: mockTelnyxNumber,
+        from: mockCallerNumber,
+      });
+
+      expect(answerSpy).toHaveBeenCalledTimes(1);
+      expect(mockCallsDb.length).toBe(1);
+
+      // Send duplicate call.initiated event with same callControlId
+      await service.handleCallInitiated({
+        call_control_id: mockCallControlId,
+        to: mockTelnyxNumber,
+        from: mockCallerNumber,
+      });
+
+      // Still only answered once and only 1 DB record created
+      expect(answerSpy).toHaveBeenCalledTimes(1);
+      expect(mockCallsDb.length).toBe(1);
+    });
+
     it('18. should match phone number without leading +', async () => {
       await service.handleCallInitiated({
         call_control_id: 'ctrl-no-plus',
@@ -652,6 +676,32 @@ describe('CallsService', () => {
       await expect(
         service.handleCallHangup({ call_control_id: 'non-existent' }),
       ).resolves.not.toThrow();
+    });
+
+    it('24b. should prevent duplicate billing when handleCallHangup is called multiple times', async () => {
+      await service.handleCallInitiated({
+        call_control_id: mockCallControlId,
+        to: mockTelnyxNumber,
+        from: mockCallerNumber,
+      });
+
+      const active = service.getActiveCall(mockCallControlId)!;
+      active.startedAt = new Date(Date.now() - 125 * 1000); // 3 billable minutes
+
+      const initialBalance = mockProfilesDb[mockClientId].token_balance;
+
+      // First hangup: should deduct 3 minutes
+      await service.handleCallHangup({ call_control_id: mockCallControlId });
+      expect(mockProfilesDb[mockClientId].token_balance).toBe(initialBalance - 3);
+
+      // Second duplicate hangup: should safely ignore and NOT deduct again
+      await service.handleCallHangup({ call_control_id: mockCallControlId });
+      expect(mockProfilesDb[mockClientId].token_balance).toBe(initialBalance - 3);
+    });
+
+    it('24c. should successfully invoke stopPlayback on active call', async () => {
+      const stopped = await service.stopPlayback(mockCallControlId);
+      expect(stopped).toBe(true);
     });
   });
 

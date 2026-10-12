@@ -287,6 +287,7 @@ export class VoiceController {
     return msg
       .replace(/eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/g, '[REDACTED]')
       .replace(/sk_[a-zA-Z0-9_]+/g, '[REDACTED]')
+      .replace(/KEY[0-9A-Za-z_-]{20,}/g, '[REDACTED]')
       .replace(/Bearer\s+[^\s]+/g, 'Bearer [REDACTED]');
   }
 

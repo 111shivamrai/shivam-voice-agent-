@@ -419,5 +419,32 @@ describe('MediaStreamService', () => {
       service.handleWebSocketClose(mockWs);
       expect(service.getSession(streamId)).toBeUndefined();
     });
+
+    it('9. should send clear event with streamSid and stream_id for barge-in buffer flush', async () => {
+      const mockWs = {
+        readyState: 1,
+        send: jest.fn(),
+      } as any;
+      const streamId = 'stream-clear-test';
+
+      await service.handleWebSocketMessage(
+        mockWs,
+        JSON.stringify({
+          event: 'start',
+          stream_id: streamId,
+          call_control_id: mockCallControlId1,
+        }),
+      );
+
+      const cleared = service.clearAudioBuffer(mockCallControlId1);
+      expect(cleared).toBe(true);
+      expect(mockWs.send).toHaveBeenCalledWith(
+        JSON.stringify({
+          event: 'clear',
+          streamSid: streamId,
+          stream_id: streamId,
+        }),
+      );
+    });
   });
 });

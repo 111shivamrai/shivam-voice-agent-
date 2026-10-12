@@ -346,5 +346,12 @@ describe('VoiceController', () => {
       expect(res).toBeDefined();
       expect(res.responseText).toBe('Agent response via controller');
     });
+
+    it('19. should sanitize and redact JWT, Bearer tokens, and Telnyx API keys from error messages', () => {
+      const sensitiveMsg = 'Error communicating with provider: Bearer KEY01A0B074EEE7CC832A798D1FAF46BFA0_mockToken1234567890';
+      const sanitized = controller.sanitizeErrorMessage(sensitiveMsg);
+      expect(sanitized).not.toContain('KEY01A0B074EEE7CC832A798D1FAF46BFA0_mockToken1234567890');
+      expect(sanitized).toContain('[REDACTED]');
+    });
   });
 });

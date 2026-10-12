@@ -221,6 +221,19 @@ export class CallsService {
   }
 
   /**
+   * Stops active carrier playback on Telnyx.
+   */
+  public async stopPlayback(callControlId: string): Promise<boolean> {
+    try {
+      const res = await this.sendTelnyxAction(callControlId, 'playback_stop', {});
+      return res.ok;
+    } catch (err: unknown) {
+      this.logger.debug?.(`Failed to stop playback on call ${callControlId}: ${err}`);
+      return false;
+    }
+  }
+
+  /**
    * Gets WebSocket streaming URL based on BACKEND_URL configuration.
    */
   public getBackendPublicStreamUrl(callControlId?: string): string {
@@ -659,6 +672,12 @@ export class CallsService {
       return;
     }
 
+    // Idempotency: Prevent duplicate initiation for an already active call session
+    if (this.activeCalls.has(callControlId)) {
+      this.logger.warn(`Call ${callControlId} is already initiated and active. Ignoring duplicate initiation event.`);
+      return;
+    }
+
     // Look up client by assigned phone number (try To first, then From for outbound calls)
     let profile = await this.findClientByPhoneNumber(to);
     if (!profile) {
@@ -867,9 +886,17 @@ export class CallsService {
     await this.stopMediaStreaming(callControlId);
 
     const activeCall = this.activeCalls.get(callControlId);
+    if (!activeCall) {
+      this.logger.debug?.(`Call ${callControlId} already terminated or not active. Skipping hangup.`);
+      return;
+    }
+
+    // Immediately remove from activeCalls to prevent concurrent double-deduction
+    this.activeCalls.delete(callControlId);
+
     const endedAt = new Date();
-    const startedAt = activeCall ? activeCall.startedAt : endedAt;
-    const clientId = activeCall ? activeCall.clientId : null;
+    const startedAt = activeCall.startedAt;
+    const clientId = activeCall.clientId;
 
     // Calculate duration
     const durationSeconds = Math.max(0, Math.floor((endedAt.getTime() - startedAt.getTime()) / 1000));
@@ -882,17 +909,13 @@ export class CallsService {
     }
 
     // Update database call record
-    if (activeCall) {
-      await this.updateCallRecordInDb(activeCall.callRecordId, {
-        status: 'completed',
-        duration_seconds: durationSeconds,
-        minutes_used: minutesUsed,
-        ended_at: endedAt,
-        transcript: activeCall.transcript,
-      });
-
-      this.activeCalls.delete(callControlId);
-    }
+    await this.updateCallRecordInDb(activeCall.callRecordId, {
+      status: 'completed',
+      duration_seconds: durationSeconds,
+      minutes_used: minutesUsed,
+      ended_at: endedAt,
+      transcript: activeCall.transcript,
+    });
 
     // Remove from VoiceSessionService
     this.voiceSessionService.removeSession(callControlId);
