@@ -30,7 +30,7 @@ async function bootstrap() {
     ...(configuredFrontendUrl
       ? configuredFrontendUrl
           .split(',')
-          .map((url) => url.trim())
+          .map((url) => url.trim().replace(/\/+$/, ''))
           .filter((url) => url.length > 0)
       : []),
   ];
@@ -44,7 +44,11 @@ async function bootstrap() {
       if (!origin) {
         return callback(null, true);
       }
-      if (allowedOrigins.includes(origin)) {
+      const cleanOrigin = origin.trim().replace(/\/+$/, '');
+      if (
+        allowedOrigins.includes(cleanOrigin) ||
+        cleanOrigin.endsWith('.vercel.app')
+      ) {
         return callback(null, true);
       }
       return callback(

@@ -54,9 +54,6 @@ export const configuration = (): AppConfig => {
     'OPENAI_API_KEY',
     'SARVAM_API_KEY',
     'DEEPGRAM_API_KEY',
-    'TWILIO_ACCOUNT_SID',
-    'TWILIO_AUTH_TOKEN',
-    'TWILIO_PHONE_NUMBER',
     'BACKEND_URL',
     'ADMIN_PASSWORD',
   ] as const;
@@ -72,6 +69,15 @@ export const configuration = (): AppConfig => {
     );
   }
 
+  // Telephony validation: Require either TELNYX_API_KEY (locked telephony provider) or TWILIO_ACCOUNT_SID
+  const hasTelnyx = Boolean(process.env.TELNYX_API_KEY?.trim());
+  const hasTwilio = Boolean(process.env.TWILIO_ACCOUNT_SID?.trim());
+  if (!hasTelnyx && !hasTwilio) {
+    throw new Error(
+      'Application startup failed: Missing telephony credential. Please configure TELNYX_API_KEY.',
+    );
+  }
+
   const rawPort = process.env.PORT;
   const parsedPort = rawPort ? parseInt(rawPort, 10) : 3001;
   const port = Number.isNaN(parsedPort) ? 3001 : parsedPort;
@@ -82,9 +88,9 @@ export const configuration = (): AppConfig => {
   const sarvamApiKey = process.env.SARVAM_API_KEY!;
   const deepgramApiKey = process.env.DEEPGRAM_API_KEY!;
   const smallestApiKey = process.env.SMALLEST_API_KEY;
-  const twilioAccountSid = process.env.TWILIO_ACCOUNT_SID!;
-  const twilioAuthToken = process.env.TWILIO_AUTH_TOKEN!;
-  const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER!;
+  const twilioAccountSid = process.env.TWILIO_ACCOUNT_SID || 'AC_telnyx_mode';
+  const twilioAuthToken = process.env.TWILIO_AUTH_TOKEN || 'token_telnyx_mode';
+  const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER || process.env.TELNYX_PHONE_NUMBER || '+15550000000';
   const backendUrl = process.env.BACKEND_URL!;
   const adminPassword = process.env.ADMIN_PASSWORD!;
   const frontendUrl = process.env.FRONTEND_URL;
